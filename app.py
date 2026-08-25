@@ -5,10 +5,18 @@ import json
 import csv
 import io
 import calendar
+import os
 from fpdf import FPDF
 
 app = Flask(__name__)
 app.secret_key = "expense-manager-secret-key"
+
+# On Vercel the project root is read-only; only /tmp is writable.
+# Locally we use the project directory so the DB persists across restarts.
+if os.environ.get("VERCEL") or not os.access(os.path.dirname(os.path.abspath(__file__)), os.W_OK):
+    DB_PATH = "/tmp/database.db"
+else:
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.db")
 
 CURRENCY_SYMBOLS = {
     "INR": "₹",
@@ -20,7 +28,7 @@ CURRENCY_SYMBOLS = {
 
 
 def get_setting(key, default):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
@@ -31,7 +39,7 @@ def get_setting(key, default):
 
 
 def set_setting(key, value):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     connection.commit()
@@ -117,7 +125,7 @@ def get_sorted_payment_methods(cursor):
 
 
 def init_db():
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     # Create expenses table
@@ -216,7 +224,7 @@ def init_db():
 
 @app.route("/")
 def home():
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
@@ -328,7 +336,7 @@ def add_expense():
         date = request.form["date"]
         payment_method = request.form.get("payment_method", "Cash")
 
-        connection = sqlite3.connect("database.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("""
             INSERT INTO expenses
@@ -341,7 +349,7 @@ def add_expense():
         return redirect("/")
 
     # Fetch options dynamically
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
     
@@ -384,7 +392,7 @@ def add_income():
         date = request.form["date"]
         payment_method = request.form.get("payment_method", "Cash")
 
-        connection = sqlite3.connect("database.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("""
             INSERT INTO income
@@ -397,7 +405,7 @@ def add_income():
         return redirect("/")
 
     # Fetch options dynamically
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
     
@@ -433,7 +441,7 @@ def add_income():
 
 @app.route("/delete-expense/<int:expense_id>", methods=["POST"])
 def delete_expense(expense_id):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
     connection.commit()
@@ -443,7 +451,7 @@ def delete_expense(expense_id):
 
 @app.route("/delete-income/<int:income_id>", methods=["POST"])
 def delete_income(income_id):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     cursor.execute("DELETE FROM income WHERE id = ?", (income_id,))
     connection.commit()
@@ -457,7 +465,7 @@ def delete_income(income_id):
 
 @app.route("/settings")
 def settings():
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
@@ -536,7 +544,7 @@ def add_category():
         return redirect("/settings")
 
     try:
-        connection = sqlite3.connect("database.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("INSERT INTO categories (name, icon) VALUES (?, ?)", (name, icon))
         connection.commit()
@@ -557,7 +565,7 @@ def edit_category(cat_id):
         flash("Category name cannot be empty.", "error")
         return redirect("/settings")
 
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     
     # Get original category name to migrate existing transactions safely if name changed
@@ -586,7 +594,7 @@ def edit_category(cat_id):
 
 @app.route("/settings/category/delete/<int:cat_id>", methods=["POST"])
 def delete_category(cat_id):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     # Retrieve name
@@ -623,7 +631,7 @@ def add_payment_method():
         return redirect("/settings")
 
     try:
-        connection = sqlite3.connect("database.db")
+        connection = sqlite3.connect(DB_PATH)
         cursor = connection.cursor()
         cursor.execute("INSERT INTO payment_methods (name, icon) VALUES (?, ?)", (name, icon))
         connection.commit()
@@ -644,7 +652,7 @@ def edit_payment_method(pay_id):
         flash("Payment method name cannot be empty.", "error")
         return redirect("/settings")
 
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     # Get original payment method name to migrate existing transactions safely
@@ -673,7 +681,7 @@ def edit_payment_method(pay_id):
 
 @app.route("/settings/payment/delete/<int:pay_id>", methods=["POST"])
 def delete_payment_method(pay_id):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
 
     # Retrieve name
@@ -708,7 +716,7 @@ def delete_payment_method(pay_id):
 def transactions_view():
     filter_type = request.args.get("type", "all").strip().lower()
     
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
     
@@ -771,7 +779,7 @@ def transactions_view():
 
 @app.route("/analytics")
 def analytics():
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
@@ -922,7 +930,7 @@ def analytics():
 
 @app.route("/categories")
 def categories_view():
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
 
@@ -979,7 +987,7 @@ def categories_view():
 # =========================================
 
 def compute_report_data(report_type, target_val):
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     cursor = connection.cursor()
     
@@ -1130,7 +1138,7 @@ def downloads_view():
     currency_code, currency_symbol = get_currency_info()
     
     # Sidebar parameter calculations (budget progress etc)
-    connection = sqlite3.connect("database.db")
+    connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     current_month_str = now.strftime("%Y-%m")
     cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = ?", (current_month_str,))
