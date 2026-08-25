@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings | Expense Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="app-container">
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="sidebar-logo">
+                    <div class="logo-icon">💰</div>
+                    <div class="logo-text">
+                        <h1>Expense Manager</h1>
+                        <p>Track. Manage. Save.</p>
+                    </div>
+                </div>
+
+                <ul class="sidebar-menu">
+                    <li><a href="/" class="menu-item"><span class="menu-item-icon">📱</span> Dashboard</a></li>
+                    <li><a href="/transactions" class="menu-item"><span class="menu-item-icon">📋</span> Transactions</a></li>
+                    <li class="mobile-only-action"><button type="button" class="mobile-fab" onclick="openActionSheet()"><span>+</span></button></li>
+                    <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
+                    <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
+                    <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
+                    <li><a href="/settings" class="menu-item active"><span class="menu-item-icon">⚙️</span> Settings</a></li>
+                </ul>
+            </div>
+
+            <div class="sidebar-bottom">
+                <div class="sidebar-budget-card">
+                    <span class="budget-card-title">Monthly Overview</span>
+                    <div class="budget-progress-container">
+                        <svg class="progress-ring" width="100" height="100">
+                            <circle class="progress-ring-bg" stroke="#18221f" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"/>
+                            <circle class="progress-ring-circle" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"
+                                    style="stroke-dashoffset: {{ 251.2 - (251.2 * budget_percent_capped) / 100 }};"/>
+                        </svg>
+                        <span class="budget-percent-text">{{ budget_percent_capped }}%</span>
+                    </div>
+                    <div class="budget-details">
+                        <p>{{ currency_symbol }}{{ "%.0f"|format(monthly_expenses) }} of {{ currency_symbol }}{{ "%.0f"|format(budget_limit) }}</p>
+                        <span>Spent this month</span>
+                    </div>
+                </div>
+
+                <button class="logout-btn">
+                    <span class="logout-icon">↩</span> Logout
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <header class="main-header" style="margin-bottom: 25px;">
+                <div class="header-left">
+                    <h2>Settings</h2>
+                    <p>Configure currency, monthly budget, and custom properties.</p>
+                </div>
+            </header>
+
+            <!-- Alerts for validation/notifications -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert {{ category }}">
+                            <span>{% if category == 'success' %}✅{% else %}⚠️{% endif %}</span>
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <div class="settings-grid">
+                
+                <!-- Currency Settings -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <h3>Currency</h3>
+                        <div class="settings-card-sub">Choose your default currency across all pages</div>
+                    </div>
+                    
+                    <form action="/settings/currency" method="POST">
+                        <div class="settings-form-row">
+                            <div class="form-group" style="margin-bottom: 0; flex: 1;">
+                                <select name="currency" required>
+                                    <option value="INR" {% if currency_code == 'INR' %}selected{% endif %}>₹ INR — Indian Rupee</option>
+                                    <option value="USD" {% if currency_code == 'USD' %}selected{% endif %}>$ USD — US Dollar</option>
+                                    <option value="EUR" {% if currency_code == 'EUR' %}selected{% endif %}>€ EUR — Euro</option>
+                                    <option value="GBP" {% if currency_code == 'GBP' %}selected{% endif %}>£ GBP — British Pound</option>
+                                    <option value="JPY" {% if currency_code == 'JPY' %}selected{% endif %}>¥ JPY — Japanese Yen</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="settings-save-btn">Save</button>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Monthly Budget Settings -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <h3>Monthly Budget</h3>
+                        <div class="settings-card-sub">Set budget limit for the current month ({{ current_month_name }})</div>
+                    </div>
+                    
+                    <form action="/settings/budget" method="POST">
+                        <div class="settings-form-row">
+                            <div class="form-group" style="margin-bottom: 0; flex: 1;">
+                                <div class="amount-input">
+                                    <span>{{ currency_symbol }}</span>
+                                    <input type="number" name="monthly_budget" step="0.01" min="0" value="{{ '%.2f'|format(budget_limit) }}" required>
+                                </div>
+                            </div>
+                            <button type="submit" class="settings-save-btn">Save</button>
+                        </div>
+                    </form>
+
+                    <!-- Budget Progress Bar -->
+                    <div class="budget-bar-container">
+                        <div class="budget-bar-bg">
+                            <div class="budget-bar-fill {% if budget_percent >= 100 %}danger{% elif budget_percent >= 85 %}warning{% endif %}" style="width: {{ budget_percent_capped }}%;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Budget stats row -->
+                    <div class="budget-stats-row">
+                        <div class="budget-stat-item">
+                            <span class="budget-stat-label">Spent</span>
+                            <span class="budget-stat-value">{{ currency_symbol }}{{ "%.0f"|format(monthly_expenses) }}</span>
+                        </div>
+                        <div class="budget-stat-item">
+                            <span class="budget-stat-label">Remaining</span>
+                            <span class="budget-stat-value">{{ currency_symbol }}{{ "%.0f"|format(remaining_budget) }}</span>
+                        </div>
+                        <div class="budget-stat-item">
+                            <span class="budget-stat-label">Progress</span>
+                            <span class="budget-stat-value">{{ "%.1f"|format(budget_percent) }}%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Categories Settings -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <h3>Categories</h3>
+                        <div class="settings-card-sub">Manage dynamic categories for recording transactions</div>
+                    </div>
+
+                    <div class="settings-list">
+                        {% for category in categories %}
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">{{ category.icon or '📦' }}</span>
+                                    <span>{{ category.name }}</span>
+                                </div>
+                                <div class="settings-item-actions">
+                                    <button type="button" class="action-btn-text" onclick="openEditCategoryModal('{{ category.id }}', '{{ category.name }}', '{{ category.icon }}')">Edit</button>
+                                    <form action="/settings/category/delete/{{ category.id }}" method="POST" style="display:inline;" onsubmit="return confirmDeleteAction(event, 'category')">
+                                        <button type="submit" class="action-btn-text delete">Delete</button>
+                                    </form>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+
+                    <button type="button" class="settings-add-btn" onclick="openAddCategoryModal()">+ Add Category</button>
+                </div>
+
+                <!-- Payment Methods Settings -->
+                <div class="settings-card">
+                    <div class="settings-card-header">
+                        <h3>Payment Methods</h3>
+                        <div class="settings-card-sub">Configure accounts/payment modes</div>
+                    </div>
+
+                    <div class="settings-list">
+                        {% for method in payment_methods %}
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">{{ method.icon or '💳' }}</span>
+                                    <span>{{ method.name }}</span>
+                                </div>
+                                <div class="settings-item-actions">
+                                    <button type="button" class="action-btn-text" onclick="openEditPaymentModal('{{ method.id }}', '{{ method.name }}', '{{ method.icon }}')">Edit</button>
+                                    <form action="/settings/payment/delete/{{ method.id }}" method="POST" style="display:inline;" onsubmit="return confirmDeleteAction(event, 'payment method')">
+                                        <button type="submit" class="action-btn-text delete">Delete</button>
+                                    </form>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+
+                    <button type="button" class="settings-add-btn" onclick="openAddPaymentModal()">+ Add Payment Method</button>
+                </div>
+
+                <!-- Reports & Downloads (Mobile Only Settings Option) -->
+                <div class="settings-card mobile-only-card" style="align-items: stretch;">
+                    <div class="settings-card-header" style="margin-bottom: 12px;">
+                        <h3>Reports & Downloads</h3>
+                        <div class="settings-card-sub">Extract and export PDF & CSV expense statements</div>
+                    </div>
+                    <div style="margin-top: 5px;">
+                        <a href="/downloads" class="settings-save-btn" style="display: block; text-decoration: none; padding: 14px; text-align: center; width: 100%;">📥 Open Reports & Downloads</a>
+                    </div>
+                </div>
+
+            </div>
+
+        </main>
+
+    </div>
+
+    <!-- Add Category Modal -->
+    <div id="addCategoryModal" class="modal-overlay">
+        <form action="/settings/category/add" method="POST" class="modal-card-custom" style="max-width: 400px; text-align: left;">
+            <h3 style="margin-bottom: 20px; text-align: center;">Add Category</h3>
+            <div class="form-group">
+                <label for="add_cat_name">Category Name</label>
+                <input type="text" id="add_cat_name" name="name" placeholder="e.g. Health" required>
+            </div>
+            <div class="form-group">
+                <label for="add_cat_icon">Icon (Emoji)</label>
+                <input type="text" id="add_cat_icon" name="icon" placeholder="e.g. 🩺" value="📦" required>
+            </div>
+            <div class="modal-buttons" style="margin-top: 25px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeAddCategoryModal()">Cancel</button>
+                <button type="submit" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;">Add Category</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Edit Category Modal -->
+    <div id="editCategoryModal" class="modal-overlay">
+        <form id="editCategoryForm" method="POST" class="modal-card-custom" style="max-width: 400px; text-align: left;">
+            <h3 style="margin-bottom: 20px; text-align: center;">Edit Category</h3>
+            <div class="form-group">
+                <label for="edit_cat_name">Category Name</label>
+                <input type="text" id="edit_cat_name" name="name" required>
+            </div>
+            <div class="form-group">
+                <label for="edit_cat_icon">Icon (Emoji)</label>
+                <input type="text" id="edit_cat_icon" name="icon" required>
+            </div>
+            <div class="modal-buttons" style="margin-top: 25px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeEditCategoryModal()">Cancel</button>
+                <button type="submit" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;">Save Changes</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Add Payment Method Modal -->
+    <div id="addPaymentModal" class="modal-overlay">
+        <form action="/settings/payment/add" method="POST" class="modal-card-custom" style="max-width: 400px; text-align: left;">
+            <h3 style="margin-bottom: 20px; text-align: center;">Add Payment Method</h3>
+            <div class="form-group">
+                <label for="add_pay_name">Method Name</label>
+                <input type="text" id="add_pay_name" name="name" placeholder="e.g. Net Banking" required>
+            </div>
+            <div class="form-group">
+                <label for="add_pay_icon">Icon (Emoji)</label>
+                <input type="text" id="add_pay_icon" name="icon" placeholder="e.g. 🏦" value="💳" required>
+            </div>
+            <div class="modal-buttons" style="margin-top: 25px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeAddPaymentModal()">Cancel</button>
+                <button type="submit" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;">Add Method</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Edit Payment Method Modal -->
+    <div id="editPaymentModal" class="modal-overlay">
+        <form id="editPaymentForm" method="POST" class="modal-card-custom" style="max-width: 400px; text-align: left;">
+            <h3 style="margin-bottom: 20px; text-align: center;">Edit Payment Method</h3>
+            <div class="form-group">
+                <label for="edit_pay_name">Method Name</label>
+                <input type="text" id="edit_pay_name" name="name" required>
+            </div>
+            <div class="form-group">
+                <label for="edit_pay_icon">Icon (Emoji)</label>
+                <input type="text" id="edit_pay_icon" name="icon" required>
+            </div>
+            <div class="modal-buttons" style="margin-top: 25px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeEditPaymentModal()">Cancel</button>
+                <button type="submit" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;">Save Changes</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Custom Deletion Request Modal -->
+    <div id="deleteConfirmModal" class="modal-overlay">
+        <div class="modal-card-custom">
+            <div class="modal-icon">⚠️</div>
+            <h3 id="deleteModalTitle">Delete Item?</h3>
+            <p id="deleteModalText">Are you sure you want to delete this? This action cannot be undone.</p>
+            <div class="modal-buttons">
+                <button type="button" class="modal-btn-cancel" onclick="closeDeleteModal()">Cancel</button>
+                <button type="button" class="modal-btn-delete" id="confirmDeleteBtn">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Modal Controls Utility
+        function showModal(id) {
+            const modal = document.getElementById(id);
+            modal.style.display = 'flex';
+            setTimeout(() => modal.classList.add('active'), 10);
+        }
+
+        function hideModal(id) {
+            const modal = document.getElementById(id);
+            modal.classList.remove('active');
+            setTimeout(() => modal.style.display = 'none', 250);
+        }
+
+        // Category Add/Edit
+        function openAddCategoryModal() {
+            showModal('addCategoryModal');
+        }
+        function closeAddCategoryModal() {
+            hideModal('addCategoryModal');
+        }
+        function openEditCategoryModal(id, name, icon) {
+            const form = document.getElementById('editCategoryForm');
+            form.action = `/settings/category/edit/${id}`;
+            document.getElementById('edit_cat_name').value = name;
+            document.getElementById('edit_cat_icon').value = icon;
+            showModal('editCategoryModal');
+        }
+        function closeEditCategoryModal() {
+            hideModal('editCategoryModal');
+        }
+
+        // Payment Add/Edit
+        function openAddPaymentModal() {
+            showModal('addPaymentModal');
+        }
+        function closeAddPaymentModal() {
+            hideModal('addPaymentModal');
+        }
+        function openEditPaymentModal(id, name, icon) {
+            const form = document.getElementById('editPaymentForm');
+            form.action = `/settings/payment/edit/${id}`;
+            document.getElementById('edit_pay_name').value = name;
+            document.getElementById('edit_pay_icon').value = icon;
+            showModal('editPaymentModal');
+        }
+        function closeEditPaymentModal() {
+            hideModal('editPaymentModal');
+        }
+
+        // Deletion interceptor
+        let deleteFormReference = null;
+        
+        function confirmDeleteAction(event, itemType) {
+            event.preventDefault();
+            deleteFormReference = event.target;
+            
+            document.getElementById('deleteModalTitle').innerText = `Delete ${itemType.charAt(0).toUpperCase() + itemType.slice(1)}?`;
+            document.getElementById('deleteModalText').innerText = `Are you sure you want to delete this ${itemType}? This action cannot be undone.`;
+            
+            showModal('deleteConfirmModal');
+            return false;
+        }
+
+        function closeDeleteModal() {
+            hideModal('deleteConfirmModal');
+            deleteFormReference = null;
+        }
+
+        document.addEventListener("DOMContentLoaded", function() {
+            document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
+                if (deleteFormReference) {
+                    deleteFormReference.submit();
+                }
+            });
+        });
+    </script>
+
+    <script>
+        function openActionSheet() {
+            let overlay = document.getElementById('mobileActionSheet');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'mobileActionSheet';
+                overlay.className = 'action-sheet-overlay';
+                overlay.onclick = closeActionSheet;
+                overlay.innerHTML = `
+                    <div class="action-sheet-card" onclick="event.stopPropagation()">
+                        <div class="action-sheet-handle"></div>
+                        <h3>Quick Actions</h3>
+                        <div class="action-sheet-grid">
+                            <a href="/add-expense" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(255, 107, 107, 0.05); border-color: rgba(255, 107, 107, 0.15);">💸</div>
+                                <span>Add Expense</span>
+                            </a>
+                            <a href="/add-income" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(53, 196, 119, 0.05); border-color: rgba(53, 196, 119, 0.15);">📥</div>
+                                <span>Add Income</span>
+                            </a>
+                        </div>
+                        <button type="button" class="action-sheet-close" onclick="closeActionSheet()">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            overlay.style.display = 'flex';
+            setTimeout(() => overlay.classList.add('active'), 10);
+        }
+
+        function closeActionSheet() {
+            const overlay = document.getElementById('mobileActionSheet');
+            if (overlay) {
+                overlay.classList.remove('active');
+                setTimeout(() => overlay.style.display = 'none', 250);
+            }
+        }
+    </script>
+
+</body>
+</html>

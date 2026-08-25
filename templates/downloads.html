@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Downloads | Expense Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="app-container">
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="sidebar-logo">
+                    <div class="logo-icon">💰</div>
+                    <div class="logo-text">
+                        <h1>Expense Manager</h1>
+                        <p>Track. Manage. Save.</p>
+                    </div>
+                </div>
+
+                <ul class="sidebar-menu">
+                    <li><a href="/" class="menu-item"><span class="menu-item-icon">📱</span> Dashboard</a></li>
+                    <li><a href="/transactions" class="menu-item"><span class="menu-item-icon">📋</span> Transactions</a></li>
+                    <li class="mobile-only-action"><button type="button" class="mobile-fab" onclick="openActionSheet()"><span>+</span></button></li>
+                    <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
+                    <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
+                    <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item active"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
+                    <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
+                </ul>
+            </div>
+
+            <div class="sidebar-bottom">
+                <div class="sidebar-budget-card">
+                    <span class="budget-card-title">Monthly Overview</span>
+                    <div class="budget-progress-container">
+                        <svg class="progress-ring" width="100" height="100">
+                            <circle class="progress-ring-bg" stroke="#18221f" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"/>
+                            <circle class="progress-ring-circle" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"
+                                    style="stroke-dashoffset: {{ 251.2 - (251.2 * budget_percent) / 100 }};"/>
+                        </svg>
+                        <span class="budget-percent-text">{{ budget_percent }}%</span>
+                    </div>
+                    <div class="budget-details">
+                        <p>{{ currency_symbol }}{{ "%.0f"|format(monthly_expenses) }} of {{ currency_symbol }}{{ "%.0f"|format(budget_limit) }}</p>
+                        <span>Spent this month</span>
+                    </div>
+                </div>
+
+                <button class="logout-btn">
+                    <span class="logout-icon">↩</span> Logout
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <header class="form-header-nav" style="margin-bottom: 25px;">
+                <a href="/settings" class="back-btn-circle">←</a>
+                <div class="form-title">
+                    <h2>Downloads</h2>
+                    <p>Generate and export professional PDF/CSV reports.</p>
+                </div>
+            </header>
+
+            <div class="analytics-grid" style="margin-bottom: 25px;">
+                
+                <!-- Daily Report -->
+                <div class="settings-card">
+                    <div class="settings-card-header" style="margin-bottom: 15px;">
+                        <h3>Daily Expense Report</h3>
+                        <div class="settings-card-sub">Extract transaction records for a specific date</div>
+                    </div>
+                    
+                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;">
+                        <input type="hidden" name="type" value="daily">
+                        <input type="hidden" name="month" value="{{ target_month }}">
+                        <div class="form-group-custom" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
+                            <label style="font-size: 13px; color: var(--text-secondary); font-weight: 600;">Select Date</label>
+                            <div class="date-input-wrapper" style="width: 100%;">
+                                <input type="text" name="date" value="{{ target_date }}" required readonly onclick="openCustomDatePicker(this)" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
+                                <span class="calendar-icon" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); pointer-events: none;">📅</span>
+                            </div>
+                        </div>
+                        <button type="submit" class="settings-save-btn" style="width: 100%; border-radius: 10px; margin-top: 10px;">Generate Report</button>
+                    </form>
+                </div>
+
+                <!-- Monthly Report -->
+                <div class="settings-card">
+                    <div class="settings-card-header" style="margin-bottom: 15px;">
+                        <h3>Monthly Expense Report</h3>
+                        <div class="settings-card-sub">Generate full metrics and day-by-day analysis</div>
+                    </div>
+                    
+                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;">
+                        <input type="hidden" name="type" value="monthly">
+                        <input type="hidden" name="date" value="{{ target_date }}">
+                        <div class="form-group-custom" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
+                            <label style="font-size: 13px; color: var(--text-secondary); font-weight: 600;">Select Month</label>
+                            <div class="date-input-wrapper" style="width: 100%;">
+                                <input type="text" name="month" value="{{ target_month }}" required readonly onclick="openCustomMonthPicker(this)" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
+                                <span class="calendar-icon" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); pointer-events: none;">📅</span>
+                            </div>
+                        </div>
+                        <button type="submit" class="settings-save-btn" style="width: 100%; border-radius: 10px; margin-top: 10px;">Generate Report</button>
+                    </form>
+                </div>
+
+            </div>
+
+            <!-- Report Details Container -->
+            {% if has_data %}
+                <div id="generatedReportSection" class="settings-card" style="align-items: stretch; margin-bottom: 30px;">
+                    <div class="settings-card-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; margin-bottom: 20px; flex-wrap: wrap; gap: 15px;">
+                        <div>
+                            <h3 style="font-size: 18px; color: var(--color-green);">Generated Report</h3>
+                            <div class="settings-card-sub">{{ report_title }} ({{ report_type|capitalize }})</div>
+                        </div>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <a href="/downloads/pdf?type={{ report_type }}&date={{ target_date }}&month={{ target_month }}" class="settings-save-btn" style="background-color: var(--color-green); color: #050d09;">Download PDF</a>
+                            <a href="/downloads/csv?type={{ report_type }}&date={{ target_date }}&month={{ target_month }}" class="settings-save-btn">Download CSV</a>
+                        </div>
+                    </div>
+
+                    <!-- Metrics Summaries -->
+                    <div class="budget-stats-row" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 20px; gap: 15px;">
+                        <div class="budget-stat-item">
+                            <span class="budget-stat-label">Total Spent</span>
+                            <span class="budget-stat-value" style="color: var(--color-red); font-size: 20px;">{{ currency_symbol }}{{ "%.2f"|format(report_data.total_spent) }}</span>
+                        </div>
+                        <div class="budget-stat-item">
+                            <span class="budget-stat-label">Transactions</span>
+                            <span class="budget-stat-value" style="font-size: 20px;">{{ report_data.num_transactions }}</span>
+                        </div>
+                        {% if report_type == 'monthly' %}
+                            <div class="budget-stat-item">
+                                <span class="budget-stat-label">Avg Daily Spend</span>
+                                <span class="budget-stat-value" style="font-size: 20px;">{{ currency_symbol }}{{ "%.2f"|format(report_data.avg_daily_spend) }}</span>
+                            </div>
+                            <div class="budget-stat-item">
+                                <span class="budget-stat-label">Max Spending Day</span>
+                                <span class="budget-stat-value" style="font-size: 20px;">{{ currency_symbol }}{{ "%.2f"|format(report_data.highest_spending_day) }}</span>
+                            </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Category Breakdown -->
+                    <div style="margin-bottom: 25px;">
+                        <h4 style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--text-primary);">Category Breakdown</h4>
+                        <div class="settings-list" style="max-height: none; overflow: visible;">
+                            {% for row in report_data.category_breakdown %}
+                                <div class="settings-item">
+                                    <div class="settings-item-left">
+                                        <span class="settings-item-icon">📦</span>
+                                        <div>
+                                            <div style="font-size: 14px; font-weight: 600;">{{ row.category }}</div>
+                                        </div>
+                                    </div>
+                                    <span style="font-weight: 700; color: var(--text-primary);">{{ currency_symbol }}{{ "%.2f"|format(row.total) }}</span>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    {% if report_type == 'monthly' %}
+                        <!-- Day by Day breakdown -->
+                        <div style="margin-bottom: 25px;">
+                            <h4 style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--text-primary);">Day-by-Day Breakdown</h4>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px;">
+                                {% for day in report_data.day_by_day %}
+                                    <div style="background-color: #0c110f; border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; text-align: center;">
+                                        <div style="font-size: 11px; color: var(--text-secondary);">{{ day.day_label }}</div>
+                                        <div style="font-size: 13px; font-weight: 700; margin-top: 4px; color: {% if day.amount > 0 %}var(--color-red){% else %}var(--text-secondary){% endif %};">
+                                            {{ currency_symbol }}{{ "%.0f"|format(day.amount) }}
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    {% endif %}
+
+                    <!-- Transactions List -->
+                    <div>
+                        <h4 style="font-size: 14px; font-weight: 700; margin-bottom: 12px; color: var(--text-primary);">Transactions Log</h4>
+                        <div class="transaction-list">
+                            {% for expense in report_data.expenses %}
+                                <div class="transaction-row">
+                                    <div class="transaction-row-left">
+                                        <div class="category-badge">📦</div>
+                                        <div class="transaction-details">
+                                            <h4>{{ expense.category }}</h4>
+                                            <p>{{ expense.description or "No description" }}</p>
+                                        </div>
+                                    </div>
+                                    <div class="transaction-row-right">
+                                        <span class="transaction-date" style="margin-right: 15px;">{{ expense.date }}</span>
+                                        <span class="transaction-amount expense" style="font-weight: 700;">- {{ currency_symbol }}{{ "%.2f"|format(expense.amount) }}</span>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                </div>
+            {% else %}
+                <!-- Empty State / Warning -->
+                <div class="settings-card" style="text-align: center; padding: 40px 20px; margin-bottom: 30px; align-items: center;">
+                    <div style="font-size: 40px; margin-bottom: 15px;">🧾</div>
+                    <h3 style="font-size: 16px; font-weight: 700; margin-bottom: 8px; color: var(--text-primary);">No data available for this period.</h3>
+                    <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">There are no transactions matching the selected range.</p>
+                    <div style="display: flex; justify-content: center; gap: 10px; opacity: 0.4; pointer-events: none;">
+                        <button class="settings-save-btn" disabled>Download PDF</button>
+                        <button class="settings-save-btn" disabled>Download CSV</button>
+                    </div>
+                </div>
+            {% endif %}
+
+        </main>
+
+    </div>
+
+    <!-- Mobile Quick Actions FAB -->
+    <script>
+        function openActionSheet() {
+            let overlay = document.getElementById('mobileActionSheet');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'mobileActionSheet';
+                overlay.className = 'action-sheet-overlay';
+                overlay.onclick = closeActionSheet;
+                overlay.innerHTML = `
+                    <div class="action-sheet-card" onclick="event.stopPropagation()">
+                        <div class="action-sheet-handle"></div>
+                        <h3>Quick Actions</h3>
+                        <div class="action-sheet-grid">
+                            <a href="/add-expense" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(255, 107, 107, 0.05); border-color: rgba(255, 107, 107, 0.15);">💸</div>
+                                <span>Add Expense</span>
+                            </a>
+                            <a href="/add-income" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(53, 196, 119, 0.05); border-color: rgba(53, 196, 119, 0.15);">📥</div>
+                                <span>Add Income</span>
+                            </a>
+                        </div>
+                        <button type="button" class="action-sheet-close" onclick="closeActionSheet()">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            overlay.style.display = 'flex';
+            setTimeout(() => overlay.classList.add('active'), 10);
+        }
+
+        function closeActionSheet() {
+            const overlay = document.getElementById('mobileActionSheet');
+            if (overlay) {
+                overlay.classList.remove('active');
+                setTimeout(() => overlay.style.display = 'none', 250);
+            }
+        }
+    </script>
+
+    <!-- Custom Date Picker Modal -->
+    <div id="customDatePickerModal" class="modal-overlay">
+        <div class="modal-card-custom date-picker-card">
+            <div class="modal-icon" style="color: var(--color-green);">📅</div>
+            <h3>Select Date</h3>
+            
+            <div class="month-selector-controls">
+                <button type="button" class="month-nav-btn" onclick="adjustDatePickerMonth(-1)">‹</button>
+                <span id="datePickerMonthLabel" style="font-size: 16px; font-weight: 700; min-width: 140px; text-align: center; color: var(--text-primary);">August 2026</span>
+                <button type="button" class="month-nav-btn" onclick="adjustDatePickerMonth(1)">›</button>
+            </div>
+            
+            <div class="calendar-grid-header">
+                <div>Su</div><div>Mo</div><div>Tu</div><div>We</div><div>Th</div><div>Fr</div><div>Sa</div>
+            </div>
+            <div id="calendarDaysGrid" class="calendar-days-grid"></div>
+            
+            <div style="margin: 12px 0 5px 0;">
+                <button type="button" class="month-today-btn" onclick="setDatePickerToToday()">Today</button>
+            </div>
+            
+            <div class="modal-buttons" style="margin-top: 15px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeDatePicker()">Cancel</button>
+                <button type="button" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;" onclick="applyDatePickerDate()">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Month Picker Modal -->
+    <div id="customMonthPickerModal" class="modal-overlay">
+        <div class="modal-card-custom month-picker-card">
+            <div class="modal-icon" style="color: #9c88ff;">📅</div>
+            <h3>Select Month</h3>
+            
+            <div class="month-selector-controls">
+                <button type="button" class="month-nav-btn" onclick="adjustMonthPickerMonth(-1)">‹</button>
+                <span id="monthPickerLabelCustom" style="font-size: 16px; font-weight: 700; min-width: 140px; text-align: center; color: var(--text-primary);">August 2026</span>
+                <button type="button" class="month-nav-btn" onclick="adjustMonthPickerMonth(1)">›</button>
+            </div>
+            
+            <div style="margin: 15px 0;">
+                <button type="button" class="month-today-btn" onclick="setMonthPickerToToday()">Today</button>
+            </div>
+            
+            <div class="modal-buttons" style="margin-top: 15px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeMonthPickerCustom()">Cancel</button>
+                <button type="button" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;" onclick="applyMonthPickerMonth()">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Custom Date Picker State & JS
+        let currentPickerYear = 2026;
+        let currentPickerMonth = 8; 
+        let currentSelectedDay = 25;
+        let activeDateInput = null;
+
+        function openCustomDatePicker(inputEl) {
+            activeDateInput = inputEl;
+            const val = inputEl.value; 
+            const parts = val.split('-');
+            if (parts.length === 3) {
+                currentPickerYear = parseInt(parts[0], 10);
+                currentPickerMonth = parseInt(parts[1], 10);
+                currentSelectedDay = parseInt(parts[2], 10);
+            } else {
+                const today = new Date();
+                currentPickerYear = today.getFullYear();
+                currentPickerMonth = today.getMonth() + 1;
+                currentSelectedDay = today.getDate();
+            }
+            
+            renderCalendarDays();
+            
+            const modal = document.getElementById('customDatePickerModal');
+            modal.style.display = 'flex';
+            setTimeout(() => modal.classList.add('active'), 10);
+        }
+
+        function renderCalendarDays() {
+            const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            document.getElementById('datePickerMonthLabel').innerText = monthNames[currentPickerMonth - 1] + " " + currentPickerYear;
+            
+            const daysGrid = document.getElementById('calendarDaysGrid');
+            daysGrid.innerHTML = '';
+            
+            const firstDay = new Date(currentPickerYear, currentPickerMonth - 1, 1).getDay();
+            const totalDays = new Date(currentPickerYear, currentPickerMonth, 0).getDate();
+            
+            for (let i = 0; i < firstDay; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'calendar-day-cell empty';
+                daysGrid.appendChild(cell);
+            }
+            
+            const today = new Date();
+            const todayY = today.getFullYear();
+            const todayM = today.getMonth() + 1;
+            const todayD = today.getDate();
+            
+            for (let day = 1; day <= totalDays; day++) {
+                const cell = document.createElement('div');
+                cell.className = 'calendar-day-cell';
+                cell.innerText = day;
+                
+                if (day === currentSelectedDay) {
+                    cell.classList.add('selected');
+                }
+                
+                if (currentPickerYear === todayY && currentPickerMonth === todayM && day === todayD) {
+                    cell.classList.add('today-marker');
+                }
+                
+                cell.onclick = function() {
+                    const prevSel = daysGrid.querySelector('.calendar-day-cell.selected');
+                    if (prevSel) prevSel.classList.remove('selected');
+                    
+                    cell.classList.add('selected');
+                    currentSelectedDay = day;
+                };
+                
+                daysGrid.appendChild(cell);
+            }
+        }
+
+        function adjustDatePickerMonth(offset) {
+            currentPickerMonth += offset;
+            if (currentPickerMonth > 12) {
+                currentPickerMonth = 1;
+                currentPickerYear += 1;
+            } else if (currentPickerMonth < 1) {
+                currentPickerMonth = 12;
+                currentPickerYear -= 1;
+            }
+            renderCalendarDays();
+        }
+
+        function setDatePickerToToday() {
+            const today = new Date();
+            currentPickerYear = today.getFullYear();
+            currentPickerMonth = today.getMonth() + 1;
+            currentSelectedDay = today.getDate();
+            renderCalendarDays();
+        }
+
+        function closeDatePicker() {
+            const modal = document.getElementById('customDatePickerModal');
+            modal.classList.remove('active');
+            setTimeout(() => modal.style.display = 'none', 250);
+        }
+
+        function applyDatePickerDate() {
+            if (activeDateInput) {
+                const y = currentPickerYear;
+                const m = String(currentPickerMonth).padStart(2, '0');
+                const d = String(currentSelectedDay).padStart(2, '0');
+                activeDateInput.value = `${y}-${m}-${d}`;
+            }
+            closeDatePicker();
+        }
+
+        // Custom Month Picker State & JS
+        let currentMonthPickerYear = 2026;
+        let currentMonthPickerMonth = 8;
+        let activeMonthInput = null;
+
+        function openCustomMonthPicker(inputEl) {
+            activeMonthInput = inputEl;
+            const val = inputEl.value; 
+            const parts = val.split('-');
+            if (parts.length === 2) {
+                currentMonthPickerYear = parseInt(parts[0], 10);
+                currentMonthPickerMonth = parseInt(parts[1], 10);
+            } else {
+                const today = new Date();
+                currentMonthPickerYear = today.getFullYear();
+                currentMonthPickerMonth = today.getMonth() + 1;
+            }
+            
+            updateMonthPickerLabel();
+            
+            const modal = document.getElementById('customMonthPickerModal');
+            modal.style.display = 'flex';
+            setTimeout(() => modal.classList.add('active'), 10);
+        }
+
+        function updateMonthPickerLabel() {
+            const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            document.getElementById('monthPickerLabelCustom').innerText = monthNames[currentMonthPickerMonth - 1] + " " + currentMonthPickerYear;
+        }
+
+        function adjustMonthPickerMonth(offset) {
+            currentMonthPickerMonth += offset;
+            if (currentMonthPickerMonth > 12) {
+                currentMonthPickerMonth = 1;
+                currentMonthPickerYear += 1;
+            } else if (currentMonthPickerMonth < 1) {
+                currentMonthPickerMonth = 12;
+                currentMonthPickerYear -= 1;
+            }
+            updateMonthPickerLabel();
+        }
+
+        function setMonthPickerToToday() {
+            const today = new Date();
+            currentMonthPickerYear = today.getFullYear();
+            currentMonthPickerMonth = today.getMonth() + 1;
+            updateMonthPickerLabel();
+        }
+
+        function closeMonthPickerCustom() {
+            const modal = document.getElementById('customMonthPickerModal');
+            modal.classList.remove('active');
+            setTimeout(() => modal.style.display = 'none', 250);
+        }
+
+        function applyMonthPickerMonth() {
+            if (activeMonthInput) {
+                const y = currentMonthPickerYear;
+                const m = String(currentMonthPickerMonth).padStart(2, '0');
+                activeMonthInput.value = `${y}-${m}`;
+            }
+            closeMonthPickerCustom();
+        }
+
+        // Auto scroll to generated report section on load
+        document.addEventListener("DOMContentLoaded", function() {
+            const reportSection = document.getElementById('generatedReportSection');
+            if (reportSection) {
+                setTimeout(() => {
+                    reportSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 100);
+            }
+        });
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics | Expense Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="app-container">
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="sidebar-logo">
+                    <div class="logo-icon">💰</div>
+                    <div class="logo-text">
+                        <h1>Expense Manager</h1>
+                        <p>Track. Manage. Save.</p>
+                    </div>
+                </div>
+
+                <ul class="sidebar-menu">
+                    <li><a href="/" class="menu-item"><span class="menu-item-icon">📱</span> Dashboard</a></li>
+                    <li><a href="/transactions" class="menu-item"><span class="menu-item-icon">📋</span> Transactions</a></li>
+                    <li class="mobile-only-action"><button type="button" class="mobile-fab" onclick="openActionSheet()"><span>+</span></button></li>
+                    <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
+                    <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
+                    <li><a href="/analytics" class="menu-item active"><span class="menu-item-icon">📈</span> Analytics</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
+                    <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
+                </ul>
+            </div>
+
+            <div class="sidebar-bottom">
+                <div class="sidebar-budget-card">
+                    <span class="budget-card-title">Monthly Overview</span>
+                    <div class="budget-progress-container">
+                        <svg class="progress-ring" width="100" height="100">
+                            <circle class="progress-ring-bg" stroke="#18221f" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"/>
+                            <circle class="progress-ring-circle" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"
+                                    style="stroke-dashoffset: {{ 251.2 - (251.2 * budget_percent) / 100 }};"/>
+                        </svg>
+                        <span class="budget-percent-text">{{ budget_percent }}%</span>
+                    </div>
+                    <div class="budget-details">
+                        <p>{{ currency_symbol }}{{ "%.0f"|format(monthly_expenses) }} of {{ currency_symbol }}{{ "%.0f"|format(budget_limit) }}</p>
+                        <span>Spent this month</span>
+                    </div>
+                </div>
+
+                <button class="logout-btn">
+                    <span class="logout-icon">↩</span> Logout
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <header class="main-header" style="margin-bottom: 25px;">
+                <div class="header-left">
+                    <h2>Analytics</h2>
+                    <p>Visual insights of your monthly financial flows ({{ current_month_name }}).</p>
+                </div>
+                <div class="chart-filter">
+                    <select onchange="handleRangeChange(this.value)" style="background-color: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; outline: none;">
+                        <option value="today" {% if filter_range == 'today' %}selected{% endif %}>Today</option>
+                        <option value="this_week" {% if filter_range == 'this_week' %}selected{% endif %}>This Week</option>
+                        <option value="this_month" {% if filter_range == 'this_month' %}selected{% endif %}>This Month</option>
+                        <option value="last_month" {% if filter_range == 'last_month' %}selected{% endif %}>Last Month</option>
+                        <option value="this_year" {% if filter_range == 'this_year' %}selected{% endif %}>This Year</option>
+                        <option value="custom" {% if filter_range == 'custom' %}selected{% endif %}>Custom Month</option>
+                    </select>
+                </div>
+            </header>
+
+            <div class="analytics-grid">
+                
+                <!-- Category Share (Doughnut Chart) -->
+                <div class="settings-card" style="align-items: stretch;">
+                    <div class="settings-card-header" style="margin-bottom: 15px;">
+                        <h3>Spending Breakdown</h3>
+                        <div class="settings-card-sub">Share of expenses by category this month</div>
+                    </div>
+                    
+                    <div class="chart-box-custom">
+                        {% if category_data %}
+                            <canvas id="categoryDoughnutChart"></canvas>
+                        {% else %}
+                            <div style="text-align: center; color: var(--text-secondary); width: 100%;">
+                                <div style="font-size: 32px; margin-bottom: 12px;">📊</div>
+                                <p style="font-size: 13px;">No expense data for this month yet.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Metrics and comparisons -->
+                <div style="display: flex; flex-direction: column; gap: 20px;">
+                    
+                    <!-- Month Overview Card -->
+                    <div class="settings-card">
+                        <div class="settings-card-header">
+                            <h3>Monthly Comparison</h3>
+                            <div class="settings-card-sub">Flow values recorded in {{ current_month_name }}</div>
+                        </div>
+
+                        <div class="budget-stats-row" style="grid-template-columns: repeat(2, 1fr);">
+                            <div class="budget-stat-item">
+                                <span class="budget-stat-label" style="color: var(--color-green);">Income</span>
+                                <span class="budget-stat-value" style="font-size: 18px;">+ {{ currency_symbol }}{{ "%.2f"|format(monthly_income) }}</span>
+                            </div>
+                            <div class="budget-stat-item">
+                                <span class="budget-stat-label" style="color: var(--color-red);">Expenses</span>
+                                <span class="budget-stat-value" style="font-size: 18px;">- {{ currency_symbol }}{{ "%.2f"|format(monthly_expenses) }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Statistics Card -->
+                    <div class="settings-card">
+                        <div class="settings-card-header">
+                            <h3>Key Spending Metrics</h3>
+                            <div class="settings-card-sub">Stats derived from the active period</div>
+                        </div>
+
+                        <div class="settings-list" style="max-height: none; overflow: visible;">
+                            
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">🏆</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Top Category</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ top_category }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">📊</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Average Transaction</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ currency_symbol }}{{ "%.2f"|format(avg_expense) }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">🔥</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Largest Expense</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ currency_symbol }}{{ "%.2f"|format(largest_expense) }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">⚡</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Highest Spending Day</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">
+                                            {% if highest_day_val > 0 %}
+                                                {{ currency_symbol }}{{ "%.2f"|format(highest_day_val) }} ({{ highest_day_label }})
+                                            {% else %}
+                                                N/A
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">📈</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Average Daily Spend</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ currency_symbol }}{{ "%.2f"|format(average_daily_spend) }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">👑</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Most Used Category</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ most_used_category }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">💳</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Most Used Payment Method</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ most_used_pm }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-item">
+                                <div class="settings-item-left">
+                                    <span class="settings-item-icon">🔢</span>
+                                    <div>
+                                        <div style="font-size: 11px; color: var(--text-secondary); text-transform: uppercase;">Total Transactions</div>
+                                        <div style="font-size: 14px; font-weight: 700; margin-top: 2px;">{{ total_transactions }}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+
+        </main>
+
+    </div>
+
+    <!-- ChartJS Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    {% if category_data %}
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const ctx = document.getElementById('categoryDoughnutChart').getContext('2d');
+            
+            const chartData = {
+                labels: {{ labels_json|safe }},
+                datasets: [{
+                    data: {{ values_json|safe }},
+                    backgroundColor: [
+                        '#35c477', // green
+                        '#00a8ff', // blue
+                        '#9c88ff', // purple
+                        '#ff6b6b', // red
+                        '#f1c40f', // yellow
+                        '#e67e22', // orange
+                        '#1abc9c', // teal
+                        '#95a5a6'  // grey
+                    ],
+                    borderWidth: 1.5,
+                    borderColor: '#111715',
+                    hoverOffset: 4
+                }]
+            };
+
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                color: '#7f8985',
+                                font: {
+                                    family: 'Inter',
+                                    size: 12
+                                },
+                                padding: 15
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: '#111715',
+                            titleColor: '#7f8985',
+                            bodyColor: '#f5f7f6',
+                            borderColor: '#1d2723',
+                            borderWidth: 1,
+                            padding: 10,
+                            displayColors: true,
+                            callbacks: {
+                                label: function(context) {
+                                    return ' ' + context.label + ': ' + '{{ currency_symbol }}' + context.parsed.toFixed(2);
+                                }
+                            }
+                        }
+                    },
+                    cutout: '68%'
+                }
+            });
+        });
+    </script>
+    {% endif %}
+
+    <script>
+        function openActionSheet() {
+            let overlay = document.getElementById('mobileActionSheet');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'mobileActionSheet';
+                overlay.className = 'action-sheet-overlay';
+                overlay.onclick = closeActionSheet;
+                overlay.innerHTML = `
+                    <div class="action-sheet-card" onclick="event.stopPropagation()">
+                        <div class="action-sheet-handle"></div>
+                        <h3>Quick Actions</h3>
+                        <div class="action-sheet-grid">
+                            <a href="/add-expense" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(255, 107, 107, 0.05); border-color: rgba(255, 107, 107, 0.15);">💸</div>
+                                <span>Add Expense</span>
+                            </a>
+                            <a href="/add-income" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(53, 196, 119, 0.05); border-color: rgba(53, 196, 119, 0.15);">📥</div>
+                                <span>Add Income</span>
+                            </a>
+                        </div>
+                        <button type="button" class="action-sheet-close" onclick="closeActionSheet()">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            overlay.style.display = 'flex';
+            setTimeout(() => overlay.classList.add('active'), 10);
+        }
+
+        function closeActionSheet() {
+            const overlay = document.getElementById('mobileActionSheet');
+            if (overlay) {
+                overlay.classList.remove('active');
+                setTimeout(() => overlay.style.display = 'none', 250);
+            }
+        }
+    </script>
+
+    <!-- Custom Month Picker Modal -->
+    <div id="monthPickerModal" class="modal-overlay">
+        <div class="modal-card-custom month-picker-card">
+            <div class="modal-icon" style="color: #9c88ff;">📅</div>
+            <h3>Select Month</h3>
+            
+            <div class="month-selector-controls">
+                <button type="button" class="month-nav-btn" onclick="adjustPickerMonth(-1)">‹</button>
+                <span id="pickerMonthLabel" style="font-size: 16px; font-weight: 700; min-width: 140px; text-align: center; color: var(--text-primary);">August 2026</span>
+                <button type="button" class="month-nav-btn" onclick="adjustPickerMonth(1)">›</button>
+            </div>
+            
+            <div style="margin: 15px 0;">
+                <button type="button" class="month-today-btn" onclick="setPickerMonthToToday()">Today</button>
+            </div>
+            
+            <div class="modal-buttons" style="margin-top: 15px;">
+                <button type="button" class="modal-btn-cancel" onclick="closeMonthPicker()">Cancel</button>
+                <button type="button" class="modal-btn-delete" style="background-color: var(--color-green); color: #050d09;" onclick="applyPickerMonth()">Apply</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function handleRangeChange(val) {
+            if (val === 'custom') {
+                openMonthPicker('{{ selected_month }}');
+            } else {
+                window.location.href = "/analytics?range=" + val;
+            }
+        }
+
+        let pickerYear = 2026;
+        let pickerMonth = 8;
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+        function openMonthPicker(currentMonthStr) {
+            const parts = currentMonthStr.split('-');
+            pickerYear = parseInt(parts[0], 10);
+            pickerMonth = parseInt(parts[1], 10);
+            
+            updatePickerLabel();
+            
+            const modal = document.getElementById('monthPickerModal');
+            modal.style.display = 'flex';
+            setTimeout(() => modal.classList.add('active'), 10);
+        }
+
+        function adjustPickerMonth(offset) {
+            pickerMonth += offset;
+            if (pickerMonth > 12) {
+                pickerMonth = 1;
+                pickerYear += 1;
+            } else if (pickerMonth < 1) {
+                pickerMonth = 12;
+                pickerYear -= 1;
+            }
+            updatePickerLabel();
+        }
+
+        function setPickerMonthToToday() {
+            const today = new Date();
+            pickerYear = today.getFullYear();
+            pickerMonth = today.getMonth() + 1;
+            updatePickerLabel();
+        }
+
+        function updatePickerLabel() {
+            document.getElementById('pickerMonthLabel').innerText = monthNames[pickerMonth - 1] + " " + pickerYear;
+        }
+
+        function closeMonthPicker() {
+            const modal = document.getElementById('monthPickerModal');
+            modal.classList.remove('active');
+            setTimeout(() => modal.style.display = 'none', 250);
+        }
+
+        function applyPickerMonth() {
+            const formattedMonth = pickerYear + "-" + String(pickerMonth).padStart(2, '0');
+            window.location.href = "/analytics?range=custom&month=" + formattedMonth;
+        }
+    </script>
+
+</body>
+</html>

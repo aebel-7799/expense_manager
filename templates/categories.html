@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Categories | Expense Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="app-container">
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="sidebar-logo">
+                    <div class="logo-icon">💰</div>
+                    <div class="logo-text">
+                        <h1>Expense Manager</h1>
+                        <p>Track. Manage. Save.</p>
+                    </div>
+                </div>
+
+                <ul class="sidebar-menu">
+                    <li><a href="/" class="menu-item"><span class="menu-item-icon">📱</span> Dashboard</a></li>
+                    <li><a href="/transactions" class="menu-item"><span class="menu-item-icon">📋</span> Transactions</a></li>
+                    <li class="mobile-only-action"><button type="button" class="mobile-fab" onclick="openActionSheet()"><span>+</span></button></li>
+                    <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
+                    <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
+                    <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/categories" class="menu-item active"><span class="menu-item-icon">🏷️</span> Categories</a></li>
+                    <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
+                </ul>
+            </div>
+
+            <div class="sidebar-bottom">
+                <div class="sidebar-budget-card">
+                    <span class="budget-card-title">Monthly Overview</span>
+                    <div class="budget-progress-container">
+                        <svg class="progress-ring" width="100" height="100">
+                            <circle class="progress-ring-bg" stroke="#18221f" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"/>
+                            <circle class="progress-ring-circle" stroke-width="8" fill="transparent" r="40" cx="50" cy="50"
+                                    style="stroke-dashoffset: {{ 251.2 - (251.2 * budget_percent) / 100 }};"/>
+                        </svg>
+                        <span class="budget-percent-text">{{ budget_percent }}%</span>
+                    </div>
+                    <div class="budget-details">
+                        <p>{{ currency_symbol }}{{ "%.0f"|format(monthly_expenses) }} of {{ currency_symbol }}{{ "%.0f"|format(budget_limit) }}</p>
+                        <span>Spent this month</span>
+                    </div>
+                </div>
+
+                <button class="logout-btn">
+                    <span class="logout-icon">↩</span> Logout
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            
+            <header class="main-header" style="margin-bottom: 25px;">
+                <div class="header-left">
+                    <h2>Categories</h2>
+                    <p>Overview of active transaction categories and their total spending share.</p>
+                </div>
+                <a href="/settings" class="btn-primary">
+                    ⚙️ Manage Categories
+                </a>
+            </header>
+
+            <!-- Category badges grid -->
+            <div class="category-overview-grid">
+                {% if categories %}
+                    {% for cat in categories %}
+                        <div class="category-overview-card">
+                            <div class="category-info-meta">
+                                <div class="category-info-icon">
+                                    {{ cat.icon or '📦' }}
+                                </div>
+                                <div class="category-info-details">
+                                    <h4>{{ cat.name }}</h4>
+                                    <span>Used in {{ cat.count }} logs</span>
+                                </div>
+                            </div>
+                            <div class="category-spend-sum">
+                                <div class="val">{{ currency_symbol }}{{ "%.2f"|format(cat.total_spent) }}</div>
+                                <div class="label">Total Spent</div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                {% else %}
+                    <div style="grid-column: 1 / -1; text-align: center; padding: 60px 0; color: var(--text-secondary);">
+                        <div style="font-size: 32px; margin-bottom: 12px;">🏷️</div>
+                        <p>No active categories found. Add categories in settings!</p>
+                    </div>
+                {% endif %}
+            </div>
+
+        </main>
+
+    </div>
+
+    <script>
+        function openActionSheet() {
+            let overlay = document.getElementById('mobileActionSheet');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'mobileActionSheet';
+                overlay.className = 'action-sheet-overlay';
+                overlay.onclick = closeActionSheet;
+                overlay.innerHTML = `
+                    <div class="action-sheet-card" onclick="event.stopPropagation()">
+                        <div class="action-sheet-handle"></div>
+                        <h3>Quick Actions</h3>
+                        <div class="action-sheet-grid">
+                            <a href="/add-expense" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(255, 107, 107, 0.05); border-color: rgba(255, 107, 107, 0.15);">💸</div>
+                                <span>Add Expense</span>
+                            </a>
+                            <a href="/add-income" class="action-sheet-item">
+                                <div class="action-icon-circle" style="background: rgba(53, 196, 119, 0.05); border-color: rgba(53, 196, 119, 0.15);">📥</div>
+                                <span>Add Income</span>
+                            </a>
+                        </div>
+                        <button type="button" class="action-sheet-close" onclick="closeActionSheet()">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            overlay.style.display = 'flex';
+            setTimeout(() => overlay.classList.add('active'), 10);
+        }
+
+        function closeActionSheet() {
+            const overlay = document.getElementById('mobileActionSheet');
+            if (overlay) {
+                overlay.classList.remove('active');
+                setTimeout(() => overlay.style.display = 'none', 250);
+            }
+        }
+    </script>
+
+</body>
+</html>
