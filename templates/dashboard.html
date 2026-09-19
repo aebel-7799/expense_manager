@@ -30,7 +30,7 @@
                     <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
                     <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
                     <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
-                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">⬇️</span> Downloads</a></li>
                     <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
                     <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
                 </ul>
@@ -65,7 +65,7 @@
             <!-- Main Header -->
             <header class="main-header">
                 <div class="header-greeting">
-                    <h2>Good evening, Aebel 👋</h2>
+                    <h2 id="dynamicGreeting">Hello, there 👋</h2>
                     <p>Here's what's happening with your money today.</p>
                 </div>
                 <a href="/add-expense" class="btn-primary">
@@ -478,6 +478,42 @@
             const formattedMonth = pickerYear + "-" + String(pickerMonth).padStart(2, '0');
             window.location.href = "/?month=" + formattedMonth;
         }
+    </script>
+
+    <!-- Toast Notification System -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        // Dynamic greeting
+        (function() {
+            const h = new Date().getHours();
+            const greeting = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+            const el = document.getElementById('dynamicGreeting');
+            if (el) el.textContent = greeting + ' 👋';
+        })();
+
+        // Toast system
+        function showToast(message, type) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + (type || 'success');
+            toast.style.position = 'relative';
+            toast.innerHTML = '<span class="toast-icon"></span><span>' + message + '</span><div class="toast-progress"></div>';
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('hiding');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // Show flashed messages as toasts
+        document.addEventListener('DOMContentLoaded', function() {
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+            showToast({{ message|tojson }}, {{ category|tojson }});
+            {% endfor %}
+            {% endwith %}
+        });
     </script>
 
 </body>

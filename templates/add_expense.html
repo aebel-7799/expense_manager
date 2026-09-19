@@ -6,8 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Add Expense | Expense Manager</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
 </head>
 
 <body>
@@ -32,7 +30,7 @@
                     <li class="desktop-only-menu"><a href="/add-expense" class="menu-item active"><span class="menu-item-icon">💸</span> Add Expense</a></li>
                     <li class="desktop-only-menu"><a href="/add-income" class="menu-item"><span class="menu-item-icon">📥</span> Add Income</a></li>
                     <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
-                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">⬇️</span> Downloads</a></li>
                     <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
                     <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
                 </ul>
@@ -136,6 +134,7 @@
                                 >
                                 <span class="calendar-icon">📅</span>
                             </div>
+                            <span class="date-friendly-label" id="dateFriendlyLabel"></span>
                         </div>
 
                         <!-- Payment Method Selector -->
@@ -153,7 +152,7 @@
                         </div>
 
                         <!-- Action Button -->
-                        <button type="submit" class="btn-primary" style="width: 100%; justify-content: center; padding: 15px; font-size: 15px;">
+                        <button type="submit" id="submitBtn" class="btn-primary" style="width: 100%; justify-content: center; padding: 15px; font-size: 15px;">
                             + Add Expense
                         </button>
 
@@ -170,17 +169,8 @@
     </div>
 
     <!-- Scripts -->
-    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script>
         document.addEventListener("DOMContentLoaded", function() {
-            flatpickr("#date", {
-                dateFormat: "Y-m-d",
-                altInput: true,
-                altFormat: "F j, Y",
-                defaultDate: "today",
-                disableMobile: true
-            });
-
             // Sync payment method visual state on page load
             document.querySelectorAll('.payment-option-pill input[type="radio"]').forEach(radio => {
                 if (radio.checked) {
@@ -189,7 +179,40 @@
                     radio.parentElement.classList.remove('active');
                 }
             });
+
+            // Set default date and friendly label
+            const dateInput = document.getElementById('date');
+            if (dateInput && !dateInput.value) {
+                const today = new Date();
+                const y = today.getFullYear();
+                const m = String(today.getMonth() + 1).padStart(2, '0');
+                const d = String(today.getDate()).padStart(2, '0');
+                dateInput.value = `${y}-${m}-${d}`;
+                updateFriendlyDateLabel(dateInput.value);
+            }
+
+            // Loading spinner on form submit
+            const form = document.querySelector('form.form-body');
+            if (form) {
+                form.addEventListener('submit', function() {
+                    const btn = document.getElementById('submitBtn');
+                    if (btn) {
+                        btn.classList.add('loading');
+                        btn.innerHTML = '<span class="btn-spinner"></span> Saving...';
+                    }
+                });
+            }
         });
+
+        function updateFriendlyDateLabel(isoStr) {
+            const label = document.getElementById('dateFriendlyLabel');
+            if (!label || !isoStr) return;
+            const parts = isoStr.split('-');
+            if (parts.length !== 3) return;
+            const d = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2]));
+            const opts = { weekday:'long', year:'numeric', month:'long', day:'numeric' };
+            label.textContent = d.toLocaleDateString('en-US', opts);
+        }
 
         function updatePaymentSelect(el) {
             document.querySelectorAll('.payment-option-pill').forEach(pill => {
@@ -385,11 +408,12 @@
                 const m = String(currentPickerMonth).padStart(2, '0');
                 const d = String(currentSelectedDay).padStart(2, '0');
                 activeDateInput.value = `${y}-${m}-${d}`;
+                updateFriendlyDateLabel(activeDateInput.value);
             }
             closeDatePicker();
         }
 
-        // Set default date value on load if empty
+        // Set default date value on load if empty (fallback)
         document.addEventListener("DOMContentLoaded", function() {
             const dateInput = document.getElementById('date');
             if (dateInput && !dateInput.value) {
@@ -398,7 +422,32 @@
                 const m = String(today.getMonth() + 1).padStart(2, '0');
                 const d = String(today.getDate()).padStart(2, '0');
                 dateInput.value = `${y}-${m}-${d}`;
+                updateFriendlyDateLabel(dateInput.value);
             }
+        });
+    </script>
+
+    <!-- Toast Notification System -->
+    <div class="toast-container" id="toastContainer"></div>
+    <script>
+        function showToast(message, type) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + (type || 'success');
+            toast.style.position = 'relative';
+            toast.innerHTML = '<span class="toast-icon"></span><span>' + message + '</span><div class="toast-progress"></div>';
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('hiding');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+            showToast({{ message|tojson }}, {{ category|tojson }});
+            {% endfor %}
+            {% endwith %}
         });
     </script>
 

@@ -32,7 +32,7 @@
                     <li class="desktop-only-menu"><a href="/add-expense" class="menu-item"><span class="menu-item-icon">💸</span> Add Expense</a></li>
                     <li class="desktop-only-menu"><a href="/add-income" class="menu-item active"><span class="menu-item-icon">📥</span> Add Income</a></li>
                     <li><a href="/analytics" class="menu-item"><span class="menu-item-icon">📈</span> Analytics</a></li>
-                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">📥</span> Downloads</a></li>
+                    <li class="desktop-only-menu"><a href="/downloads" class="menu-item"><span class="menu-item-icon">⬇️</span> Downloads</a></li>
                     <li class="desktop-only-menu"><a href="/categories" class="menu-item"><span class="menu-item-icon">🏷️</span> Categories</a></li>
                     <li><a href="/settings" class="menu-item"><span class="menu-item-icon">⚙️</span> Settings</a></li>
                 </ul>
@@ -136,6 +136,7 @@
                                 >
                                 <span class="calendar-icon">📅</span>
                             </div>
+                            <span class="date-friendly-label" id="dateFriendlyLabel"></span>
                         </div>
 
                         <!-- Payment Method Selector -->
@@ -153,7 +154,7 @@
                         </div>
 
                         <!-- Action Button -->
-                        <button type="submit" class="btn-primary" style="width: 100%; justify-content: center; padding: 15px; font-size: 15px;">
+                        <button type="submit" id="submitBtn" class="btn-primary" style="width: 100%; justify-content: center; padding: 15px; font-size: 15px;">
                             + Add Income
                         </button>
 
@@ -170,17 +171,8 @@
     </div>
 
     <!-- Scripts -->
-    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script>
         document.addEventListener("DOMContentLoaded", function() {
-            flatpickr("#date", {
-                dateFormat: "Y-m-d",
-                altInput: true,
-                altFormat: "F j, Y",
-                defaultDate: "today",
-                disableMobile: true
-            });
-
             // Sync payment method visual state on page load
             document.querySelectorAll('.payment-option-pill input[type="radio"]').forEach(radio => {
                 if (radio.checked) {
@@ -189,7 +181,40 @@
                     radio.parentElement.classList.remove('active');
                 }
             });
+
+            // Set default date and friendly label
+            const dateInput = document.getElementById('date');
+            if (dateInput && !dateInput.value) {
+                const today = new Date();
+                const y = today.getFullYear();
+                const m = String(today.getMonth() + 1).padStart(2, '0');
+                const d = String(today.getDate()).padStart(2, '0');
+                dateInput.value = `${y}-${m}-${d}`;
+                updateFriendlyDateLabel(dateInput.value);
+            }
+
+            // Loading spinner on form submit
+            const form = document.querySelector('form.form-body');
+            if (form) {
+                form.addEventListener('submit', function() {
+                    const btn = document.getElementById('submitBtn');
+                    if (btn) {
+                        btn.classList.add('loading');
+                        btn.innerHTML = '<span class="btn-spinner"></span> Saving...';
+                    }
+                });
+            }
         });
+
+        function updateFriendlyDateLabel(isoStr) {
+            const label = document.getElementById('dateFriendlyLabel');
+            if (!label || !isoStr) return;
+            const parts = isoStr.split('-');
+            if (parts.length !== 3) return;
+            const d = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2]));
+            const opts = { weekday:'long', year:'numeric', month:'long', day:'numeric' };
+            label.textContent = d.toLocaleDateString('en-US', opts);
+        }
 
         function updatePaymentSelect(el) {
             document.querySelectorAll('.payment-option-pill').forEach(pill => {
@@ -271,97 +296,63 @@
 
     <script>
         // Custom Date Picker State & JS
-        let currentPickerYear = 2026;
-        let currentPickerMonth = 8; 
-        let currentSelectedDay = 25;
+        let currentPickerYear = new Date().getFullYear();
+        let currentPickerMonth = new Date().getMonth() + 1;
+        let currentSelectedDay = new Date().getDate();
         let activeDateInput = null;
 
         function openCustomDatePicker(inputEl) {
             activeDateInput = inputEl;
             let val = inputEl.value;
-            // If empty, set to today's date
             if (!val) {
                 const today = new Date();
-                const y = today.getFullYear();
-                const m = String(today.getMonth() + 1).padStart(2, '0');
-                const d = String(today.getDate()).padStart(2, '0');
-                val = `${y}-${m}-${d}`;
+                val = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
             }
-            
             const parts = val.split('-');
             if (parts.length === 3) {
                 currentPickerYear = parseInt(parts[0], 10);
                 currentPickerMonth = parseInt(parts[1], 10);
                 currentSelectedDay = parseInt(parts[2], 10);
-            } else {
-                const today = new Date();
-                currentPickerYear = today.getFullYear();
-                currentPickerMonth = today.getMonth() + 1;
-                currentSelectedDay = today.getDate();
             }
-            
             renderCalendarDays();
-            
             const modal = document.getElementById('customDatePickerModal');
             modal.style.display = 'flex';
             setTimeout(() => modal.classList.add('active'), 10);
         }
 
         function renderCalendarDays() {
-            const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-            document.getElementById('datePickerMonthLabel').innerText = monthNames[currentPickerMonth - 1] + " " + currentPickerYear;
-            
+            const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+            document.getElementById('datePickerMonthLabel').innerText = monthNames[currentPickerMonth-1] + ' ' + currentPickerYear;
             const daysGrid = document.getElementById('calendarDaysGrid');
             daysGrid.innerHTML = '';
-            
-            const firstDay = new Date(currentPickerYear, currentPickerMonth - 1, 1).getDay();
+            const firstDay = new Date(currentPickerYear, currentPickerMonth-1, 1).getDay();
             const totalDays = new Date(currentPickerYear, currentPickerMonth, 0).getDate();
-            
             for (let i = 0; i < firstDay; i++) {
                 const cell = document.createElement('div');
                 cell.className = 'calendar-day-cell empty';
                 daysGrid.appendChild(cell);
             }
-            
             const today = new Date();
-            const todayY = today.getFullYear();
-            const todayM = today.getMonth() + 1;
-            const todayD = today.getDate();
-            
             for (let day = 1; day <= totalDays; day++) {
                 const cell = document.createElement('div');
                 cell.className = 'calendar-day-cell';
                 cell.innerText = day;
-                
-                if (day === currentSelectedDay) {
-                    cell.classList.add('selected');
-                }
-                
-                if (currentPickerYear === todayY && currentPickerMonth === todayM && day === todayD) {
-                    cell.classList.add('today-marker');
-                }
-                
+                if (day === currentSelectedDay) cell.classList.add('selected');
+                if (currentPickerYear === today.getFullYear() && currentPickerMonth === today.getMonth()+1 && day === today.getDate()) cell.classList.add('today-marker');
                 cell.onclick = function() {
-                    const prevSel = daysGrid.querySelector('.calendar-day-cell.selected');
-                    if (prevSel) prevSel.classList.remove('selected');
-                    
+                    const prev = daysGrid.querySelector('.calendar-day-cell.selected');
+                    if (prev) prev.classList.remove('selected');
                     cell.classList.add('selected');
                     currentSelectedDay = day;
                 };
-                
                 daysGrid.appendChild(cell);
             }
         }
 
         function adjustDatePickerMonth(offset) {
             currentPickerMonth += offset;
-            if (currentPickerMonth > 12) {
-                currentPickerMonth = 1;
-                currentPickerYear += 1;
-            } else if (currentPickerMonth < 1) {
-                currentPickerMonth = 12;
-                currentPickerYear -= 1;
-            }
+            if (currentPickerMonth > 12) { currentPickerMonth = 1; currentPickerYear++; }
+            else if (currentPickerMonth < 1) { currentPickerMonth = 12; currentPickerYear--; }
             renderCalendarDays();
         }
 
@@ -385,20 +376,33 @@
                 const m = String(currentPickerMonth).padStart(2, '0');
                 const d = String(currentSelectedDay).padStart(2, '0');
                 activeDateInput.value = `${y}-${m}-${d}`;
+                updateFriendlyDateLabel(activeDateInput.value);
             }
             closeDatePicker();
         }
+    </script>
 
-        // Set default date value on load if empty
-        document.addEventListener("DOMContentLoaded", function() {
-            const dateInput = document.getElementById('date');
-            if (dateInput && !dateInput.value) {
-                const today = new Date();
-                const y = today.getFullYear();
-                const m = String(today.getMonth() + 1).padStart(2, '0');
-                const d = String(today.getDate()).padStart(2, '0');
-                dateInput.value = `${y}-${m}-${d}`;
-            }
+    <!-- Toast Notification System -->
+    <div class="toast-container" id="toastContainer"></div>
+    <script>
+        function showToast(message, type) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + (type || 'success');
+            toast.style.position = 'relative';
+            toast.innerHTML = '<span class="toast-icon"></span><span>' + message + '</span><div class="toast-progress"></div>';
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('hiding');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+            showToast({{ message|tojson }}, {{ category|tojson }});
+            {% endfor %}
+            {% endwith %}
         });
     </script>
 
