@@ -10,6 +10,9 @@ import io
 import calendar
 import os
 from fpdf import FPDF
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "expense-manager-secret-key")
@@ -1472,30 +1475,270 @@ def downloads_csv():
     return output
 
 
+@app.route("/downloads/xlsx")
+@login_required
+def downloads_xlsx():
+    user_id = session["user_id"]
+    report_type = request.args.get("type", "monthly").strip().lower()
+    target_date = request.args.get("date", "").strip()
+    target_month = request.args.get("month", "").strip()
+    
+    now = datetime.datetime.now()
+    if not target_date:
+        target_date = now.strftime("%Y-%m-%d")
+    if not target_month:
+        target_month = now.strftime("%Y-%m")
+        
+    target_val = target_date if report_type == "daily" else target_month
+    report_data = compute_report_data(user_id, report_type, target_val)
+    
+    if report_data["num_transactions"] == 0:
+        return "No data available for this period.", 400
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Report"
+
+    headers = ["Date", "Category", "Description", "Payment Method", "Amount"]
+    widths = [15, 22, 45, 26, 18]
+
+    header_fill = PatternFill("solid", fgColor="0C110F")
+    header_font = Font(color="FFFFFF", bold=True, size=11)
+    band_fill = PatternFill("solid", fgColor="F2F8F5")
+    thin = Side(style="thin", color="D7E3DC")
+    cell_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for col_idx, (header, width) in enumerate(zip(headers, widths), start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        cell.border = cell_border
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    ws.row_dimensions[1].height = 22
+
+    for row_idx, expense in enumerate(report_data["expenses"], start=2):
+        values = [
+            expense["date"],
+            expense["category"],
+            expense["description"] or "",
+            expense["payment_method"],
+            float(expense["amount"]),
+        ]
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = cell_border
+            if col_idx == 5:
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                cell.number_format = "#,##0.00"
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            if row_idx % 2 == 0:
+                cell.fill = band_fill
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:E{len(report_data['expenses']) + 1}"
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    output = make_response(buffer.getvalue())
+    output.headers["Content-Disposition"] = f"attachment; filename=report_{report_type}_{target_val}.xlsx"
+    output.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return output
+
+
 class ExpenseReportPDF(FPDF):
+    PAGE_W = 210.0
+    MARGIN = 12.0
+    CONTENT_TOP = 40.0
+    CONTENT_W = PAGE_W - 2 * MARGIN
+
+    BG = (12, 17, 15)
+    CARD = (18, 24, 21)
+    ROW_ALT = (17, 23, 20)
+    GREEN = (32, 200, 120)
+    WHITE = (238, 245, 241)
+    MUTED = (150, 163, 156)
+    DIM = (105, 120, 112)
+    BORDER = (38, 52, 45)
+
     def __init__(self, currency_symbol="Rs", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.currency_symbol = currency_symbol
 
+    def normalize_text(self, text):
+        if isinstance(text, bytes):
+            text = text.decode("latin-1")
+        try:
+            text.encode("latin-1")
+        except UnicodeEncodeError:
+            text = text.replace("₹", "Rs ").replace("€", "EUR ")
+        return super().normalize_text(text)
+
     def header(self):
-        self.set_fill_color(12, 17, 15)
-        self.rect(0, 0, 210, 32, 'F')
-        
-        self.set_text_color(53, 196, 119)
-        self.set_font("helvetica", "B", 18)
-        self.set_xy(15, 8)
-        self.cell(0, 8, "EXPENSE MANAGER", align="L")
-        
-        self.set_text_color(160, 170, 165)
-        self.set_font("helvetica", "I", 9)
-        self.set_xy(15, 16)
-        self.cell(0, 6, "Expense Reports Log Summary", align="L")
+        self.set_fill_color(*self.BG)
+        self.rect(0, 0, self.PAGE_W, self.h, "F")
+        self.set_fill_color(*self.GREEN)
+        self.rect(0, 0, self.PAGE_W, 2.2, "F")
+        if self.page_no() == 1:
+            self.set_fill_color(*self.GREEN)
+            self.rect(self.MARGIN, 9.5, 3, 13, "F")
+            self.set_text_color(*self.GREEN)
+            self.set_font("helvetica", "B", 20)
+            self.set_xy(self.MARGIN + 7, 8.5)
+            self.cell(120, 8, "EXPENSE MANAGER", align="L")
+            self.set_text_color(*self.MUTED)
+            self.set_font("helvetica", "I", 9)
+            self.set_xy(self.MARGIN + 7, 17.5)
+            self.cell(120, 5, "Expense Reports Log Summary", align="L")
+            self.set_fill_color(*self.GREEN)
+            self.rect(self.PAGE_W - self.MARGIN - 38, 10.5, 38, 10, "F")
+            self.set_text_color(*self.BG)
+            self.set_font("helvetica", "B", 9)
+            self.set_xy(self.PAGE_W - self.MARGIN - 38, 12.5)
+            self.cell(38, 6, "REPORT", align="C")
+            self.set_draw_color(*self.GREEN)
+            self.set_line_width(0.6)
+            self.line(self.MARGIN, 34, self.PAGE_W - self.MARGIN, 34)
+            self.set_y(self.CONTENT_TOP)
+        else:
+            self.set_font("helvetica", "I", 8)
+            self.set_text_color(*self.MUTED)
+            self.set_xy(self.MARGIN, 4)
+            self.cell(self.CONTENT_W, 5, "EXPENSE MANAGER - Continued", align="L")
+            self.set_draw_color(*self.GREEN)
+            self.set_line_width(0.5)
+            self.line(self.MARGIN, 12.5, self.PAGE_W - self.MARGIN, 12.5)
+            self.set_y(14)
 
     def footer(self):
-        self.set_y(-15)
+        self.set_y(-14)
+        self.set_fill_color(*self.BG)
+        self.rect(0, self.h - 14, self.PAGE_W, 14, "F")
+        self.set_draw_color(*self.GREEN)
+        self.set_line_width(0.3)
+        self.line(self.MARGIN, self.h - 14, self.PAGE_W - self.MARGIN, self.h - 14)
+        self.set_text_color(*self.MUTED)
         self.set_font("helvetica", "I", 8)
-        self.set_text_color(127, 137, 133)
         self.cell(0, 10, f"Page {self.page_no()} | Generated by Expense Manager", align="C")
+
+    def _ensure_space(self, height):
+        if self.get_y() + height > self.page_break_trigger - 3:
+            self.add_page()
+            return True
+        return False
+
+    def section_heading(self, text, continued=False):
+        self.ln(2)
+        y0 = self.get_y()
+        self.set_fill_color(*self.GREEN)
+        self.rect(self.MARGIN, y0 + 1.2, 3.2, 6, "F")
+        self.set_x(self.MARGIN + 7)
+        self.set_font("helvetica", "B", 12)
+        self.set_text_color(*self.GREEN)
+        label = text + (" (continued)" if continued else "")
+        self.cell(self.CONTENT_W - 7, 8, label, ln=True)
+        self.set_draw_color(*self.GREEN)
+        self.set_line_width(0.5)
+        self.line(self.MARGIN, self.get_y() + 0.6, self.PAGE_W - self.MARGIN, self.get_y() + 0.6)
+        self.ln(5)
+
+    def stat_card(self, x, y, w, h, label, value):
+        self.set_fill_color(*self.CARD)
+        self.set_draw_color(*self.GREEN)
+        self.set_line_width(0.3)
+        self.rect(x, y, w, h, "DF")
+        self.set_fill_color(*self.GREEN)
+        self.rect(x, y, 1.4, h, "F")
+        self.set_font("helvetica", "B", 7)
+        self.set_text_color(*self.GREEN)
+        self.set_xy(x + 4.5, y + 3.5)
+        self.cell(w - 8, 3.5, label, align="L")
+        self.set_font("helvetica", "B", 14)
+        self.set_text_color(*self.WHITE)
+        self.set_xy(x + 4.5, y + 8)
+        self.cell(w - 8, 6, value, align="L")
+
+    def category_row(self, index, category, amount):
+        y0 = self.get_y()
+        self.set_fill_color(*(self.ROW_ALT if index % 2 else self.CARD))
+        self.set_draw_color(*self.BORDER)
+        self.set_line_width(0.2)
+        self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
+        self.set_fill_color(*self.GREEN)
+        self.rect(self.MARGIN, y0, 1.2, 8, "F")
+        self.set_font("helvetica", "", 9.5)
+        self.set_text_color(*self.WHITE)
+        self.set_xy(self.MARGIN + 4, y0 + 1.5)
+        self.cell(self.CONTENT_W - 54, 5, self.fit(category, self.CONTENT_W - 54), align="L")
+        self.set_font("helvetica", "B", 9.5)
+        self.set_text_color(*self.GREEN)
+        self.set_xy(self.MARGIN + 50, y0 + 1.5)
+        self.cell(self.CONTENT_W - 54, 5, amount, align="R")
+        self.set_y(y0 + 8)
+
+    def day_cell(self, x, y, w, h, day_label, amount):
+        self.set_fill_color(*self.CARD)
+        self.set_draw_color(*self.GREEN)
+        self.set_line_width(0.25)
+        self.rect(x, y, w, h, "DF")
+        self.set_font("helvetica", "B", 7)
+        self.set_text_color(*self.GREEN)
+        self.set_xy(x + 3, y + 2)
+        self.cell(w - 6, 4, day_label, align="C")
+        self.set_font("helvetica", "B", 9)
+        self.set_text_color(*self.WHITE)
+        self.set_xy(x + 3, y + 6.5)
+        self.cell(w - 6, 4.5, amount, align="C")
+
+    def table_header_row(self):
+        y0 = self.get_y()
+        self.set_fill_color(*self.GREEN)
+        self.set_draw_color(*self.GREEN)
+        self.set_line_width(0.3)
+        self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
+        self.set_font("helvetica", "B", 8)
+        self.set_text_color(*self.BG)
+        cols = [("Date", 24, "L"), ("Category", 32, "L"), ("Description", 68, "L"), ("Payment Method", 32, "L"), ("Amount", 30, "R")]
+        x = self.MARGIN
+        for txt, w, align in cols:
+            self.set_xy(x + (3 if align == "L" else 0), y0 + 2)
+            self.cell(w, 4, txt, align=align)
+            x += w
+        self.set_y(y0 + 8)
+
+    def expense_row(self, index, expense, currency_symbol):
+        y0 = self.get_y()
+        self.set_fill_color(*(self.ROW_ALT if index % 2 else self.BG))
+        self.set_draw_color(*self.BORDER)
+        self.set_line_width(0.2)
+        self.rect(self.MARGIN, y0, self.CONTENT_W, 7.5, "DF")
+        self.set_font("helvetica", "", 8.5)
+        self.set_text_color(*self.WHITE)
+        self.set_xy(self.MARGIN + 3, y0 + 1.7)
+        self.cell(24, 4, expense["date"], align="L")
+        self.set_xy(self.MARGIN + 24 + 3, y0 + 1.7)
+        self.cell(32 - 1, 4, self.fit(expense["category"], 28), align="L")
+        self.set_text_color(*self.MUTED)
+        self.set_xy(self.MARGIN + 24 + 32 + 3, y0 + 1.7)
+        self.cell(68 - 1, 4, self.fit(expense["description"] or "", 66), align="L")
+        self.set_text_color(*self.WHITE)
+        self.set_xy(self.MARGIN + 24 + 32 + 68 + 3, y0 + 1.7)
+        self.cell(32 - 1, 4, self.fit(expense["payment_method"], 30), align="L")
+        self.set_font("helvetica", "B", 8.5)
+        self.set_text_color(*self.GREEN)
+        self.set_xy(self.MARGIN + 24 + 32 + 68 + 32, y0 + 1.7)
+        self.cell(30 - 2, 4, f"{currency_symbol}{float(expense['amount']):.2f}", align="R")
+        self.set_y(y0 + 7.5)
+
+    def fit(self, text, width):
+        text = text or ""
+        if self.get_string_width(text) <= width:
+            return text
+        result = text
+        while result and self.get_string_width(result + "...") > width:
+            result = result[:-1]
+        return result + "..."
 
 
 @app.route("/downloads/pdf")
@@ -1536,91 +1779,97 @@ def downloads_pdf():
         report_label = f"Monthly Expense Report - {report_title}"
 
     pdf = ExpenseReportPDF(currency_symbol=currency_symbol)
+    pdf.set_margins(pdf.MARGIN, pdf.CONTENT_TOP, pdf.MARGIN)
     pdf.add_page()
-    pdf.set_margins(15, 15, 15)
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    pdf.set_y(42)
-    pdf.set_font("helvetica", "B", 15)
-    pdf.set_text_color(30, 35, 33)
-    pdf.cell(0, 8, report_label, ln=True, align="L")
-    pdf.set_font("helvetica", "", 9)
-    pdf.set_text_color(100, 105, 103)
-    pdf.cell(0, 5, f"Report Date: {now.strftime('%d %b %Y %H:%M')} | Currency: {currency_symbol}", ln=True, align="L")
-    pdf.ln(5)
-    
-    pdf.set_fill_color(245, 247, 246)
-    pdf.set_draw_color(210, 215, 212)
-    pdf.set_text_color(30, 35, 33)
-    pdf.set_font("helvetica", "B", 10)
-    
-    if report_type == "daily":
-        pdf.cell(88, 14, f"Total Spent: {currency_symbol}{float(report_data['total_spent']):.2f}", border=1, fill=True, align="C")
-        pdf.cell(4, 14, "")
-        pdf.cell(88, 14, f"Transactions: {report_data['num_transactions']}", border=1, fill=True, align="C")
-        pdf.ln(18)
-    else:
-        pdf.cell(42, 14, f"Spent: {currency_symbol}{float(report_data['total_spent']):.0f}", border=1, fill=True, align="C")
-        pdf.cell(4, 14, "")
-        pdf.cell(42, 14, f"Txns: {report_data['num_transactions']}", border=1, fill=True, align="C")
-        pdf.cell(4, 14, "")
-        pdf.cell(42, 14, f"Avg Daily: {currency_symbol}{float(report_data['avg_daily_spend']):.2f}", border=1, fill=True, align="C")
-        pdf.cell(4, 14, "")
-        pdf.cell(42, 14, f"Max Day: {currency_symbol}{float(report_data['highest_spending_day']):.0f}", border=1, fill=True, align="C")
-        pdf.ln(18)
+    pdf.set_auto_page_break(auto=True, margin=14)
 
-    pdf.set_font("helvetica", "B", 12)
-    pdf.set_text_color(30, 35, 33)
-    pdf.cell(0, 8, "Category Breakdown Summary", ln=True)
-    pdf.set_font("helvetica", "", 10)
-    pdf.set_text_color(80, 85, 83)
-    
-    for row in report_data["category_breakdown"]:
-        pdf.cell(100, 7, f" {row['category']}", border="B")
-        pdf.cell(80, 7, f"{currency_symbol}{float(row['total']):.2f} ", border="B", align="R", ln=True)
-    pdf.ln(8)
-    
+    pdf._ensure_space(20)
+    y0 = pdf.get_y()
+    pdf.set_fill_color(*pdf.GREEN)
+    pdf.rect(pdf.MARGIN, y0 + 1.2, 3.2, 6, "F")
+    pdf.set_x(pdf.MARGIN + 7)
+    pdf.set_font("helvetica", "B", 15)
+    pdf.set_text_color(*pdf.GREEN)
+    pdf.cell(pdf.CONTENT_W - 7, 8, report_label, ln=True)
+    pdf.set_x(pdf.MARGIN + 7)
+    pdf.set_font("helvetica", "", 9)
+    pdf.set_text_color(*pdf.MUTED)
+    pdf.cell(pdf.CONTENT_W - 7, 5, f"Report Date: {now.strftime('%d %b %Y %H:%M')}  |  Currency: {currency_symbol}", ln=True)
+    pdf.ln(6)
+
+    card_h = 24
+    gap = 4
+    if report_type == "daily":
+        pdf._ensure_space(card_h)
+        card_w = (pdf.CONTENT_W - gap) / 2
+        x0 = pdf.MARGIN
+        y = pdf.get_y()
+        pdf.stat_card(x0, y, card_w, card_h, "Total Spent",
+                      f"{currency_symbol}{float(report_data['total_spent']):.2f}")
+        pdf.stat_card(x0 + card_w + gap, y, card_w, card_h, "Transactions",
+                      f"  {report_data['num_transactions']}")
+        pdf.set_y(y + card_h)
+    else:
+        pdf._ensure_space(card_h)
+        card_w = (pdf.CONTENT_W - 3 * gap) / 4
+        x0 = pdf.MARGIN
+        y = pdf.get_y()
+        cards = [
+            ("Spent", f"{currency_symbol}{float(report_data['total_spent']):.0f}"),
+            ("Transactions", f"  {report_data['num_transactions']}"),
+            ("Avg Daily", f"{currency_symbol}{float(report_data['avg_daily_spend']):.2f}"),
+            ("Max Day", f"{currency_symbol}{float(report_data['highest_spending_day']):.0f}"),
+        ]
+        for i, (label, value) in enumerate(cards):
+            pdf.stat_card(x0 + i * (card_w + gap), y, card_w, card_h, label, value)
+        pdf.set_y(y + card_h)
+    pdf.ln(3)
+
+    pdf.section_heading("Category Breakdown Summary")
+    for i, row in enumerate(report_data["category_breakdown"]):
+        if pdf._ensure_space(8):
+            pdf.section_heading("Category Breakdown Summary", continued=True)
+        pdf.category_row(i, row["category"], f"{currency_symbol}{float(row['total']):.2f}")
+    pdf.ln(4)
+
     if report_type == "monthly":
-        pdf.set_font("helvetica", "B", 12)
-        pdf.set_text_color(30, 35, 33)
-        pdf.cell(0, 8, "Day-by-Day Spending Summary", ln=True)
-        pdf.set_font("helvetica", "", 8)
-        pdf.set_text_color(80, 85, 83)
-        
-        col_width = 44
-        col_count = 0
-        for item in report_data["day_by_day"]:
-            pdf.cell(col_width, 6, f"{item['day_label']}: {currency_symbol}{float(item['amount']):.0f}", border=1, align="C")
-            col_count += 1
-            if col_count == 4:
-                pdf.ln(6)
-                col_count = 0
-        if col_count > 0:
-            pdf.ln(10)
-        else:
-            pdf.ln(4)
-            
-    pdf.set_font("helvetica", "B", 12)
-    pdf.set_text_color(30, 35, 33)
-    pdf.cell(0, 8, "Detailed Expense Log List", ln=True)
-    
-    pdf.set_font("helvetica", "B", 9)
-    pdf.set_fill_color(225, 230, 227)
-    pdf.cell(25, 8, " Date", border=1, fill=True)
-    pdf.cell(35, 8, " Category", border=1, fill=True)
-    pdf.cell(65, 8, " Description", border=1, fill=True)
-    pdf.cell(30, 8, " Payment Method", border=1, fill=True)
-    pdf.cell(25, 8, " Amount ", border=1, fill=True, align="R", ln=True)
-    
-    pdf.set_font("helvetica", "", 8)
-    for exp in report_data["expenses"]:
-        pdf.cell(25, 7, f" {exp['date']}", border=1)
-        pdf.cell(35, 7, f" {exp['category']}", border=1)
-        pdf.cell(65, 7, f" {exp['description'] or ''}", border=1)
-        pdf.cell(30, 7, f" {exp['payment_method']}", border=1)
-        pdf.cell(25, 7, f"{currency_symbol}{float(exp['amount']):.2f} ", border=1, align="R", ln=True)
-        
-    pdf_bytes = pdf.output()
+        pdf.section_heading("Day-by-Day Spending Summary")
+        items = list(report_data["day_by_day"])
+        col_width = (pdf.CONTENT_W - 3 * gap) / 4
+        cell_h = 13
+        row_h = cell_h + 1
+        first_row = True
+        y_row = pdf.get_y()
+        for idx in range(0, len(items), 4):
+            if y_row + row_h > pdf.page_break_trigger - 3:
+                pdf.add_page()
+                pdf.section_heading("Day-by-Day Spending Summary", continued=not first_row)
+                y_row = pdf.get_y()
+            chunk = items[idx:idx + 4]
+            x = pdf.MARGIN
+            for item in chunk:
+                pdf.day_cell(x, y_row, col_width, cell_h,
+                             item["day_label"],
+                             f"{currency_symbol}{float(item['amount']):.0f}")
+                x += col_width + gap
+            y_row += row_h
+            first_row = False
+        pdf.set_y(y_row)
+        pdf.ln(2)
+
+    row_h = 7.5
+    if report_data["expenses"] and pdf.get_y() + 15 + 8 + row_h > pdf.page_break_trigger - 3:
+        pdf.add_page()
+    pdf.section_heading("Detailed Expense Log List")
+    pdf.table_header_row()
+    for i, exp in enumerate(report_data["expenses"]):
+        if pdf._ensure_space(row_h):
+            pdf.section_heading("Detailed Expense Log List", continued=True)
+            pdf.table_header_row()
+        pdf.expense_row(i, exp, currency_symbol)
+    pdf.ln(2)
+
+    pdf_bytes = bytes(pdf.output())
     response = make_response(pdf_bytes)
     response.headers["Content-Disposition"] = f"attachment; filename=report_{report_type}_{target_val}.pdf"
     response.headers["Content-Type"] = "application/pdf"
