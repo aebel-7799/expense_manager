@@ -100,6 +100,10 @@
                                     <option value="GBP" {% if currency_code == 'GBP' %}selected{% endif %}>£ GBP — British Pound</option>
                                     <option value="JPY" {% if currency_code == 'JPY' %}selected{% endif %}>¥ JPY — Japanese Yen</option>
                                 </select>
+                                <div class="currency-custom-select" id="currencyCustomSelect" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-label="Currency">
+                                    <button type="button" class="currency-custom-select__trigger" id="currencyCustomTrigger" role="combobox" aria-haspopup="listbox" aria-expanded="false"></button>
+                                    <ul class="currency-custom-select__list" id="currencyCustomList" role="listbox" aria-labelledby="currencyCustomTrigger"></ul>
+                                </div>
                             </div>
                             <button type="submit" class="settings-save-btn">Save</button>
                         </div>
@@ -481,6 +485,76 @@
         function proceedLogout() {
             window.location.href = '/logout';
         }
+    </script>
+
+    <script>
+        // Mobile-only custom currency dropdown
+        (function () {
+            const select = document.querySelector('select[name="currency"]');
+            const widget = document.getElementById('currencyCustomSelect');
+            if (!select || !widget) return;
+
+            const trigger = widget.querySelector('.currency-custom-select__trigger');
+            const list = widget.querySelector('.currency-custom-select__list');
+
+            function buildOptions() {
+                list.innerHTML = '';
+                Array.from(select.options).forEach((opt) => {
+                    const li = document.createElement('li');
+                    li.className = 'currency-custom-select__option';
+                    li.setAttribute('role', 'option');
+                    li.dataset.value = opt.value;
+                    li.textContent = opt.textContent;
+                    li.setAttribute('aria-selected', String(opt.selected));
+                    li.addEventListener('click', () => {
+                        select.value = opt.value;
+                        syncTrigger();
+                        closeDropdown();
+                    });
+                    list.appendChild(li);
+                });
+            }
+
+            function syncTrigger() {
+                const selected = select.selectedOptions[0];
+                if (selected) {
+                    trigger.textContent = selected.textContent;
+                }
+                Array.from(list.children).forEach((li) => {
+                    const isSelected = li.dataset.value === select.value;
+                    li.classList.toggle('selected', isSelected);
+                    li.setAttribute('aria-selected', String(isSelected));
+                });
+            }
+
+            function openDropdown() {
+                widget.classList.add('open');
+                widget.setAttribute('aria-expanded', 'true');
+                trigger.setAttribute('aria-expanded', 'true');
+            }
+
+            function closeDropdown() {
+                widget.classList.remove('open');
+                widget.setAttribute('aria-expanded', 'false');
+                trigger.setAttribute('aria-expanded', 'false');
+            }
+
+            trigger.addEventListener('click', (e) => {
+                e.preventDefault();
+                widget.classList.contains('open') ? closeDropdown() : openDropdown();
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!widget.contains(e.target)) closeDropdown();
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') closeDropdown();
+            });
+
+            buildOptions();
+            syncTrigger();
+        })();
     </script>
 
 </body>
