@@ -53,9 +53,9 @@
                     </div>
                 </div>
 
-                <button class="logout-btn">
+                <a href="/logout" class="logout-btn">
                     <span class="logout-icon">↩</span> Logout
-                </button>
+                </a>
             </div>
         </aside>
 
@@ -65,7 +65,7 @@
             <!-- Main Header -->
             <header class="main-header">
                 <div class="header-greeting">
-                    <h2 id="dynamicGreeting">Hello, there 👋</h2>
+                    <h2 id="dynamicGreeting">Hello, {{ session.get("username", "there") }} 👋</h2>
                     <p>Here's what's happening with your money today.</p>
                 </div>
                 <a href="/add-expense" class="btn-primary">

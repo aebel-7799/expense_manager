@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up | Expense Manager</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body class="auth-body">
+
+    <!-- Toast Notification System -->
+    <div class="toast-container" id="toastContainer">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="toast toast-{{ category }}">
+                        <span class="toast-icon"></span>
+                        <span class="toast-msg">{{ message }}</span>
+                        <button type="button" class="toast-close" onclick="this.parentElement.remove()">×</button>
+                        <div class="toast-progress"></div>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+    </div>
+
+    <div class="auth-wrapper">
+        <div class="auth-card">
+            <div class="auth-header">
+                <div class="auth-logo">💰</div>
+                <h1>Create Account</h1>
+                <p>Start tracking and managing your finances securely</p>
+            </div>
+
+            <form action="/signup" method="POST" class="auth-form">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <div class="input-with-icon">
+                        <span class="input-icon">👤</span>
+                        <input type="text" id="username" name="username" placeholder="Choose a username" required autofocus>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <div class="input-with-icon">
+                        <span class="input-icon">✉️</span>
+                        <input type="email" id="email" name="email" placeholder="name@example.com" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <div class="input-with-icon">
+                        <span class="input-icon">🔒</span>
+                        <input type="password" id="password" name="password" placeholder="At least 6 characters" minlength="6" required>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">Confirm Password</label>
+                    <div class="input-with-icon">
+                        <span class="input-icon">🔑</span>
+                        <input type="password" id="confirm_password" name="confirm_password" placeholder="Re-enter password" minlength="6" required>
+                    </div>
+                </div>
+
+                <button type="submit" class="auth-submit-btn">
+                    Create Account ➔
+                </button>
+            </form>
+
+            <div class="auth-footer">
+                <p>Already have an account? <a href="/login" class="auth-link">Sign In</a></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        setTimeout(() => {
+            const toasts = document.querySelectorAll('.toast');
+            toasts.forEach(t => {
+                t.classList.add('hiding');
+                setTimeout(() => t.remove(), 250);
+            });
+        }, 3500);
+    </script>
+</body>
+
+</html>

@@ -1,4 +1,6 @@
 from flask import Flask, render_template, request, redirect, flash, session, make_response
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 import psycopg2
 import psycopg2.extras
 import datetime
@@ -10,7 +12,7 @@ import os
 from fpdf import FPDF
 
 app = Flask(__name__)
-app.secret_key = "expense-manager-secret-key"
+app.secret_key = os.environ.get("SECRET_KEY", "expense-manager-secret-key")
 
 CURRENCY_SYMBOLS = {
     "INR": "₹",
@@ -46,10 +48,22 @@ def get_db_connection():
 
 def init_db_with_conn(conn):
     with conn.cursor() as cursor:
+        # Create users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(100) NOT NULL UNIQUE,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Create expenses table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS expenses (
                 id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 amount DOUBLE PRECISION NOT NULL,
                 category VARCHAR(255) NOT NULL,
                 description TEXT,
@@ -62,6 +76,7 @@ def init_db_with_conn(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS income (
                 id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 amount DOUBLE PRECISION NOT NULL,
                 category VARCHAR(255) NOT NULL,
                 description TEXT,
@@ -70,11 +85,13 @@ def init_db_with_conn(conn):
             )
         """)
 
-        # Create settings table
+        # Create user_settings table
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key VARCHAR(255) PRIMARY KEY,
-                value TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                key VARCHAR(255) NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (user_id, key)
             )
         """)
 
@@ -82,55 +99,57 @@ def init_db_with_conn(conn):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS categories (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL UNIQUE,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
                 icon VARCHAR(50) DEFAULT '📦'
             )
         """)
 
-        # Create payment methods table
+        # Create payment_methods table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS payment_methods (
                 id SERIAL PRIMARY KEY,
-                name VARCHAR(255) NOT NULL UNIQUE,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
                 icon VARCHAR(50) DEFAULT '💳'
             )
         """)
 
-        # Check and insert default settings if settings is empty
-        cursor.execute("SELECT COUNT(*) FROM settings")
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("INSERT INTO settings (key, value) VALUES ('currency', 'INR') ON CONFLICT DO NOTHING")
-            cursor.execute("INSERT INTO settings (key, value) VALUES ('monthly_budget', '10000.00') ON CONFLICT DO NOTHING")
+        # Alter table migrations if columns exist from previous runs
+        cursor.execute("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        cursor.execute("ALTER TABLE income ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        cursor.execute("ALTER TABLE categories ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        cursor.execute("ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
 
-        # Check and insert default categories if empty
-        cursor.execute("SELECT COUNT(*) FROM categories")
-        if cursor.fetchone()[0] == 0:
-            default_categories = [
-                ("Food", "🍔"),
-                ("Transport", "🚗"),
-                ("Shopping", "🛍️"),
-                ("Bills", "🧾"),
-                ("Entertainment", "🎮"),
-                ("Other", "📦")
-            ]
-            cursor.executemany("INSERT INTO categories (name, icon) VALUES (%s, %s) ON CONFLICT DO NOTHING", default_categories)
+        conn.commit()
 
-        # Check and insert default payment methods if empty
-        cursor.execute("SELECT COUNT(*) FROM payment_methods")
-        if cursor.fetchone()[0] == 0:
-            default_payments = [
-                ("Cash", "💵"),
-                ("UPI", "📱"),
-                ("Card", "💳"),
-                ("Bank Transfer", "🏦"),
-                ("Other", "💰")
-            ]
-            cursor.executemany("INSERT INTO payment_methods (name, icon) VALUES (%s, %s) ON CONFLICT DO NOTHING", default_payments)
 
-        # Migration column check
-        cursor.execute("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100) DEFAULT 'Cash'")
-        cursor.execute("ALTER TABLE income ADD COLUMN IF NOT EXISTS payment_method VARCHAR(100) DEFAULT 'Cash'")
+def create_default_user_data(conn, user_id):
+    with conn.cursor() as cursor:
+        # Default user settings
+        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'currency', 'INR') ON CONFLICT DO NOTHING", (user_id,))
+        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'monthly_budget', '10000.00') ON CONFLICT DO NOTHING", (user_id,))
 
+        # Default categories for this user
+        default_categories = [
+            (user_id, "Food", "🍔"),
+            (user_id, "Transport", "🚗"),
+            (user_id, "Shopping", "🛍️"),
+            (user_id, "Bills", "🧾"),
+            (user_id, "Entertainment", "🎮"),
+            (user_id, "Other", "📦")
+        ]
+        cursor.executemany("INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)", default_categories)
+
+        # Default payment methods for this user
+        default_payments = [
+            (user_id, "Cash", "💵"),
+            (user_id, "UPI", "📱"),
+            (user_id, "Card", "💳"),
+            (user_id, "Bank Transfer", "🏦"),
+            (user_id, "Other", "💰")
+        ]
+        cursor.executemany("INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)", default_payments)
         conn.commit()
 
 
@@ -143,10 +162,12 @@ def init_db():
             print(f"init_db error: {e}")
 
 
-def get_setting(key, default):
+def get_setting(user_id, key, default):
+    if not user_id:
+        return default
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key = %s", (key,))
+    cursor.execute("SELECT value FROM user_settings WHERE user_id = %s AND key = %s", (user_id, key))
     row = cursor.fetchone()
     connection.close()
     if row:
@@ -154,25 +175,46 @@ def get_setting(key, default):
     return default
 
 
-def set_setting(key, value):
+def set_setting(user_id, key, value):
+    if not user_id:
+        return
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, str(value)))
+    cursor.execute(
+        "INSERT INTO user_settings (user_id, key, value) VALUES (%s, %s, %s) ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value",
+        (user_id, key, str(value))
+    )
     connection.commit()
     connection.close()
 
 
-def get_currency_info():
-    currency_code = get_setting("currency", "INR")
+def get_currency_info(user_id):
+    currency_code = get_setting(user_id, "currency", "INR")
     currency_symbol = CURRENCY_SYMBOLS.get(currency_code, "₹")
     return currency_code, currency_symbol
+
+
+def get_sorted_payment_methods(cursor, user_id):
+    cursor.execute("SELECT * FROM payment_methods WHERE user_id = %s", (user_id,))
+    rows = cursor.fetchall()
+    order_map = {"Cash": 1, "UPI": 2, "Bank Transfer": 3, "Card": 4, "Other": 5}
+    return sorted(rows, key=lambda x: order_map.get(x["name"], 99))
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please log in to access Expense Manager.", "error")
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 def get_filter_dates():
     now = datetime.datetime.now()
     today = now.date()
     
-    # Range retrieval from request args or session
     filter_range = request.args.get("range", "").strip().lower()
     if filter_range:
         session["filter_range"] = filter_range
@@ -232,24 +274,135 @@ def get_filter_dates():
     return start_date, end_date, filter_range, selected_month, range_label
 
 
-def get_sorted_payment_methods(cursor):
-    cursor.execute("SELECT * FROM payment_methods")
-    rows = cursor.fetchall()
-    order_map = {"Cash": 1, "UPI": 2, "Bank Transfer": 3, "Card": 4, "Other": 5}
-    return sorted(rows, key=lambda x: order_map.get(x["name"], 99))
+# =========================================
+# AUTH ROUTES
+# =========================================
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if "user_id" in session:
+        return redirect("/")
+
+    if request.method == "POST":
+        username_or_email = request.form.get("username_or_email", "").strip()
+        password = request.form.get("password", "")
+
+        if not username_or_email or not password:
+            flash("Please enter both username/email and password.", "error")
+            return render_template("login.html")
+
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT * FROM users WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)",
+            (username_or_email, username_or_email)
+        )
+        user = cursor.fetchone()
+        connection.close()
+
+        if user and check_password_hash(user["password_hash"], password):
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            session["email"] = user["email"]
+            flash(f"Welcome back, {user['username']}! 👋", "success")
+            return redirect("/")
+        else:
+            flash("Invalid username/email or password.", "error")
+
+    return render_template("login.html")
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if "user_id" in session:
+        return redirect("/")
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not username or not email or not password:
+            flash("Please fill in all required fields.", "error")
+            return render_template("signup.html")
+
+        if len(username) < 3:
+            flash("Username must be at least 3 characters long.", "error")
+            return render_template("signup.html")
+
+        if "@" not in email:
+            flash("Please enter a valid email address.", "error")
+            return render_template("signup.html")
+
+        if len(password) < 6:
+            flash("Password must be at least 6 characters long.", "error")
+            return render_template("signup.html")
+
+        if password != confirm_password:
+            flash("Passwords do not match.", "error")
+            return render_template("signup.html")
+
+        connection = get_db_connection()
+        cursor = connection.cursor()
+
+        # Check existing user
+        cursor.execute(
+            "SELECT COUNT(*) FROM users WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)",
+            (username, email)
+        )
+        if cursor.fetchone()[0] > 0:
+            connection.close()
+            flash("Username or Email is already registered. Please log in.", "error")
+            return render_template("signup.html")
+
+        # Create user
+        pwd_hash = generate_password_hash(password)
+        cursor.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s) RETURNING id",
+            (username, email, pwd_hash)
+        )
+        user_id = cursor.fetchone()[0]
+        connection.commit()
+
+        # Seed initial user settings, categories, payment methods
+        create_default_user_data(connection, user_id)
+        connection.close()
+
+        # Auto log in user
+        session["user_id"] = user_id
+        session["username"] = username
+        session["email"] = email
+        flash(f"Account created successfully! Welcome, {username}! 🎉", "success")
+        return redirect("/")
+
+    return render_template("signup.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("You have been logged out.", "info")
+    return redirect("/login")
+
+
+# =========================================
+# APP MAIN DASHBOARD & VIEW ROUTES
+# =========================================
 
 @app.route("/")
+@login_required
 def home():
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Calculate Total Expenses (All-time)
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses")
+    # Calculate Total Expenses (All-time for this user)
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s", (user_id,))
     total_expenses = cursor.fetchone()["total"] or 0
 
-    # Calculate Total Income (All-time)
-    cursor.execute("SELECT SUM(amount) AS total FROM income")
+    # Calculate Total Income (All-time for this user)
+    cursor.execute("SELECT SUM(amount) AS total FROM income WHERE user_id = %s", (user_id,))
     total_income = cursor.fetchone()["total"] or 0
 
     # Calculate Total Balance
@@ -259,23 +412,23 @@ def home():
     start_date, end_date, filter_range, selected_month, range_label = get_filter_dates()
 
     # Calculate Monthly Expenses (for the currently active date range)
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     monthly_expenses = cursor.fetchone()["total"] or 0
 
-    # Calculate Spent Today Expenses (ALWAYS calculated for the actual system current date)
+    # Calculate Spent Today Expenses
     now = datetime.datetime.now()
     today_str = now.strftime("%Y-%m-%d")
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE date = %s", (today_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date = %s", (user_id, today_str))
     today_expenses = cursor.fetchone()["total"] or 0
 
-    # Get Daily Expenses for Chart.js (for the selected date range)
+    # Get Daily Expenses for Chart.js
     cursor.execute("""
         SELECT date, SUM(amount) AS total 
         FROM expenses 
-        WHERE date BETWEEN %s AND %s
+        WHERE user_id = %s AND date BETWEEN %s AND %s
         GROUP BY date 
         ORDER BY date ASC
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     chart_rows = cursor.fetchall()
 
     # Format Chart.js Data
@@ -292,7 +445,7 @@ def home():
         chart_labels.append(day_label)
         chart_values.append(float(row["total"]))
 
-    # Fallbacks if chart data is empty, so it displays a nice empty baseline chart
+    # Fallbacks if chart data is empty
     if not chart_labels:
         try:
             m_idx = int(selected_month.split('-')[1])
@@ -306,20 +459,20 @@ def home():
     chart_values_json = json.dumps(chart_values)
 
     # Fetch dynamic currency settings
-    currency_code, currency_symbol = get_currency_info()
+    currency_code, currency_symbol = get_currency_info(user_id)
 
     # Fetch budget settings
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
 
-    # Get Expenses for the SELECTED date range (joining categories table to fetch custom icons dynamically)
+    # Get Expenses for the SELECTED date range
     cursor.execute("""
         SELECT e.*, c.icon AS category_icon
         FROM expenses e
-        LEFT JOIN categories c ON e.category = c.name
-        WHERE e.date BETWEEN %s AND %s
+        LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
         ORDER BY e.date DESC, e.id DESC
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     expenses = cursor.fetchall()
 
     connection.close()
@@ -344,7 +497,9 @@ def home():
 
 
 @app.route("/add-expense", methods=["GET", "POST"])
+@login_required
 def add_expense():
+    user_id = session["user_id"]
     if request.method == "POST":
         amount = request.form["amount"]
         category = request.form["category"]
@@ -356,9 +511,9 @@ def add_expense():
         cursor = connection.cursor()
         cursor.execute("""
             INSERT INTO expenses
-            (amount, category, description, date, payment_method)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (amount, category, description, date, payment_method))
+            (user_id, amount, category, description, date, payment_method)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, amount, category, description, date, payment_method))
         connection.commit()
         connection.close()
 
@@ -369,23 +524,23 @@ def add_expense():
     connection = get_db_connection()
     cursor = connection.cursor()
     
-    cursor.execute("SELECT * FROM categories ORDER BY name ASC")
+    cursor.execute("SELECT * FROM categories WHERE user_id = %s ORDER BY name ASC", (user_id,))
     categories = cursor.fetchall()
     
-    payment_methods = get_sorted_payment_methods(cursor)
+    payment_methods = get_sorted_payment_methods(cursor, user_id)
 
     # Monthly overview sidebar metrics
     now = datetime.datetime.now()
     current_month_str = now.strftime("%Y-%m")
     current_month_name = now.strftime("%B %Y")
     
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
 
     return render_template(
         "add_expense.html",
@@ -400,7 +555,9 @@ def add_expense():
 
 
 @app.route("/add-income", methods=["GET", "POST"])
+@login_required
 def add_income():
+    user_id = session["user_id"]
     if request.method == "POST":
         amount = request.form["amount"]
         category = request.form["category"]
@@ -412,9 +569,9 @@ def add_income():
         cursor = connection.cursor()
         cursor.execute("""
             INSERT INTO income
-            (amount, category, description, date, payment_method)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (amount, category, description, date, payment_method))
+            (user_id, amount, category, description, date, payment_method)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, amount, category, description, date, payment_method))
         connection.commit()
         connection.close()
 
@@ -425,23 +582,23 @@ def add_income():
     connection = get_db_connection()
     cursor = connection.cursor()
     
-    cursor.execute("SELECT * FROM categories ORDER BY name ASC")
+    cursor.execute("SELECT * FROM categories WHERE user_id = %s ORDER BY name ASC", (user_id,))
     categories = cursor.fetchall()
     
-    payment_methods = get_sorted_payment_methods(cursor)
+    payment_methods = get_sorted_payment_methods(cursor, user_id)
 
     # Monthly overview sidebar metrics
     now = datetime.datetime.now()
     current_month_str = now.strftime("%Y-%m")
     current_month_name = now.strftime("%B %Y")
     
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
 
     return render_template(
         "add_income.html",
@@ -456,10 +613,12 @@ def add_income():
 
 
 @app.route("/delete-expense/<int:expense_id>", methods=["POST"])
+@login_required
 def delete_expense(expense_id):
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
+    cursor.execute("DELETE FROM expenses WHERE id = %s AND user_id = %s", (expense_id, user_id))
     connection.commit()
     connection.close()
     flash("Expense deleted.", "info")
@@ -467,10 +626,12 @@ def delete_expense(expense_id):
 
 
 @app.route("/delete-income/<int:income_id>", methods=["POST"])
+@login_required
 def delete_income(income_id):
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
-    cursor.execute("DELETE FROM income WHERE id = %s", (income_id,))
+    cursor.execute("DELETE FROM income WHERE id = %s AND user_id = %s", (income_id, user_id))
     connection.commit()
     connection.close()
     flash("Income deleted.", "info")
@@ -482,20 +643,22 @@ def delete_income(income_id):
 # =========================================
 
 @app.route("/settings")
+@login_required
 def settings():
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
     # Fetch settings data
-    currency_code, currency_symbol = get_currency_info()
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    currency_code, currency_symbol = get_currency_info(user_id)
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
 
     # Fetch monthly spending aggregates
     now = datetime.datetime.now()
     current_month_str = now.strftime("%Y-%m")
     current_month_name = now.strftime("%B %Y")
     
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
 
     # Calculate remaining budget and percentage
@@ -504,10 +667,10 @@ def settings():
     budget_percent_capped = min(100, int(budget_percent))
 
     # Fetch categories and payment methods
-    cursor.execute("SELECT * FROM categories ORDER BY name ASC")
+    cursor.execute("SELECT * FROM categories WHERE user_id = %s ORDER BY name ASC", (user_id,))
     categories = cursor.fetchall()
 
-    payment_methods = get_sorted_payment_methods(cursor)
+    payment_methods = get_sorted_payment_methods(cursor, user_id)
 
     connection.close()
 
@@ -527,10 +690,12 @@ def settings():
 
 
 @app.route("/settings/currency", methods=["POST"])
+@login_required
 def update_currency():
+    user_id = session["user_id"]
     new_currency = request.form.get("currency")
     if new_currency in CURRENCY_SYMBOLS:
-        set_setting("currency", new_currency)
+        set_setting(user_id, "currency", new_currency)
         flash("Default currency updated successfully.", "success")
     else:
         flash("Invalid currency selection.", "error")
@@ -538,13 +703,15 @@ def update_currency():
 
 
 @app.route("/settings/budget", methods=["POST"])
+@login_required
 def update_budget():
+    user_id = session["user_id"]
     try:
         budget_val = float(request.form["monthly_budget"])
         if budget_val < 0:
             flash("Budget amount cannot be negative.", "error")
         else:
-            set_setting("monthly_budget", f"{budget_val:.2f}")
+            set_setting(user_id, "monthly_budget", f"{budget_val:.2f}")
             flash("Monthly budget updated successfully.", "success")
     except ValueError:
         flash("Invalid budget format. Please enter a valid number.", "error")
@@ -552,7 +719,9 @@ def update_budget():
 
 
 @app.route("/settings/category/add", methods=["POST"])
+@login_required
 def add_category():
+    user_id = session["user_id"]
     name = request.form.get("name", "").strip()
     icon = request.form.get("icon", "📦").strip()
 
@@ -563,7 +732,7 @@ def add_category():
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
-        cursor.execute("INSERT INTO categories (name, icon) VALUES (%s, %s)", (name, icon))
+        cursor.execute("INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)", (user_id, name, icon))
         connection.commit()
         connection.close()
         flash(f"Category '{name}' added successfully.", "success")
@@ -574,7 +743,9 @@ def add_category():
 
 
 @app.route("/settings/category/edit/<int:cat_id>", methods=["POST"])
+@login_required
 def edit_category(cat_id):
+    user_id = session["user_id"]
     name = request.form.get("name", "").strip()
     icon = request.form.get("icon", "📦").strip()
 
@@ -585,20 +756,18 @@ def edit_category(cat_id):
     connection = get_db_connection()
     cursor = connection.cursor()
     
-    # Get original category name to migrate existing transactions safely if name changed
-    cursor.execute("SELECT name FROM categories WHERE id = %s", (cat_id,))
+    # Get original category name
+    cursor.execute("SELECT name FROM categories WHERE id = %s AND user_id = %s", (cat_id, user_id))
     orig_row = cursor.fetchone()
     
     if orig_row:
         orig_name = orig_row[0]
         try:
-            # Update categories table
-            cursor.execute("UPDATE categories SET name = %s, icon = %s WHERE id = %s", (name, icon, cat_id))
+            cursor.execute("UPDATE categories SET name = %s, icon = %s WHERE id = %s AND user_id = %s", (name, icon, cat_id, user_id))
             
-            # Cascade change to expenses and income if category name was changed
             if orig_name != name:
-                cursor.execute("UPDATE expenses SET category = %s WHERE category = %s", (name, orig_name))
-                cursor.execute("UPDATE income SET category = %s WHERE category = %s", (name, orig_name))
+                cursor.execute("UPDATE expenses SET category = %s WHERE category = %s AND user_id = %s", (name, orig_name, user_id))
+                cursor.execute("UPDATE income SET category = %s WHERE category = %s AND user_id = %s", (name, orig_name, user_id))
                 
             connection.commit()
             flash("Category details updated successfully.", "success")
@@ -610,27 +779,27 @@ def edit_category(cat_id):
 
 
 @app.route("/settings/category/delete/<int:cat_id>", methods=["POST"])
+@login_required
 def delete_category(cat_id):
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Retrieve name
-    cursor.execute("SELECT name FROM categories WHERE id = %s", (cat_id,))
+    cursor.execute("SELECT name FROM categories WHERE id = %s AND user_id = %s", (cat_id, user_id))
     cat_row = cursor.fetchone()
 
     if cat_row:
         cat_name = cat_row[0]
-        # Query if any transaction references this category
-        cursor.execute("SELECT COUNT(*) FROM expenses WHERE category = %s", (cat_name,))
+        cursor.execute("SELECT COUNT(*) FROM expenses WHERE category = %s AND user_id = %s", (cat_name, user_id))
         expense_use = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM income WHERE category = %s", (cat_name,))
+        cursor.execute("SELECT COUNT(*) FROM income WHERE category = %s AND user_id = %s", (cat_name, user_id))
         income_use = cursor.fetchone()[0]
 
         if expense_use > 0 or income_use > 0:
             flash("This category is being used by existing transactions.", "error")
         else:
-            cursor.execute("DELETE FROM categories WHERE id = %s", (cat_id,))
+            cursor.execute("DELETE FROM categories WHERE id = %s AND user_id = %s", (cat_id, user_id))
             connection.commit()
             flash("Category deleted successfully.", "success")
 
@@ -639,7 +808,9 @@ def delete_category(cat_id):
 
 
 @app.route("/settings/payment/add", methods=["POST"])
+@login_required
 def add_payment_method():
+    user_id = session["user_id"]
     name = request.form.get("name", "").strip()
     icon = request.form.get("icon", "💳").strip()
 
@@ -650,7 +821,7 @@ def add_payment_method():
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
-        cursor.execute("INSERT INTO payment_methods (name, icon) VALUES (%s, %s)", (name, icon))
+        cursor.execute("INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)", (user_id, name, icon))
         connection.commit()
         connection.close()
         flash(f"Payment method '{name}' added successfully.", "success")
@@ -661,7 +832,9 @@ def add_payment_method():
 
 
 @app.route("/settings/payment/edit/<int:pay_id>", methods=["POST"])
+@login_required
 def edit_payment_method(pay_id):
+    user_id = session["user_id"]
     name = request.form.get("name", "").strip()
     icon = request.form.get("icon", "💳").strip()
 
@@ -672,20 +845,17 @@ def edit_payment_method(pay_id):
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Get original payment method name to migrate existing transactions safely
-    cursor.execute("SELECT name FROM payment_methods WHERE id = %s", (pay_id,))
+    cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
     orig_row = cursor.fetchone()
 
     if orig_row:
         orig_name = orig_row[0]
         try:
-            # Update payment_methods table
-            cursor.execute("UPDATE payment_methods SET name = %s, icon = %s WHERE id = %s", (name, icon, pay_id))
+            cursor.execute("UPDATE payment_methods SET name = %s, icon = %s WHERE id = %s AND user_id = %s", (name, icon, pay_id, user_id))
             
-            # Cascade change to expenses and income if name was changed
             if orig_name != name:
-                cursor.execute("UPDATE expenses SET payment_method = %s WHERE payment_method = %s", (name, orig_name))
-                cursor.execute("UPDATE income SET payment_method = %s WHERE payment_method = %s", (name, orig_name))
+                cursor.execute("UPDATE expenses SET payment_method = %s WHERE payment_method = %s AND user_id = %s", (name, orig_name, user_id))
+                cursor.execute("UPDATE income SET payment_method = %s WHERE payment_method = %s AND user_id = %s", (name, orig_name, user_id))
                 
             connection.commit()
             flash("Payment method details updated successfully.", "success")
@@ -697,27 +867,27 @@ def edit_payment_method(pay_id):
 
 
 @app.route("/settings/payment/delete/<int:pay_id>", methods=["POST"])
+@login_required
 def delete_payment_method(pay_id):
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Retrieve name
-    cursor.execute("SELECT name FROM payment_methods WHERE id = %s", (pay_id,))
+    cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
     pay_row = cursor.fetchone()
 
     if pay_row:
         pay_name = pay_row[0]
-        # Query if any transaction references this payment method
-        cursor.execute("SELECT COUNT(*) FROM expenses WHERE payment_method = %s", (pay_name,))
+        cursor.execute("SELECT COUNT(*) FROM expenses WHERE payment_method = %s AND user_id = %s", (pay_name, user_id))
         expense_use = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM income WHERE payment_method = %s", (pay_name,))
+        cursor.execute("SELECT COUNT(*) FROM income WHERE payment_method = %s AND user_id = %s", (pay_name, user_id))
         income_use = cursor.fetchone()[0]
 
         if expense_use > 0 or income_use > 0:
             flash("This payment method is being used by existing transactions.", "error")
         else:
-            cursor.execute("DELETE FROM payment_methods WHERE id = %s", (pay_id,))
+            cursor.execute("DELETE FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
             connection.commit()
             flash("Payment method deleted successfully.", "success")
 
@@ -730,7 +900,9 @@ def delete_payment_method(pay_id):
 # =========================================
 
 @app.route("/transactions")
+@login_required
 def transactions_view():
+    user_id = session["user_id"]
     filter_type = request.args.get("type", "all").strip().lower()
     
     connection = get_db_connection()
@@ -741,30 +913,32 @@ def transactions_view():
         query = """
             SELECT e.id, e.amount, e.category, e.description, e.date, e.payment_method, 'expense' AS type, c.icon AS category_icon
             FROM expenses e
-            LEFT JOIN categories c ON e.category = c.name
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.user_id = %s
             ORDER BY e.date DESC, e.id DESC
         """
-        params = ()
+        params = (user_id,)
     elif filter_type == "income":
         query = """
             SELECT i.id, i.amount, i.category, i.description, i.date, i.payment_method, 'income' AS type, c.icon AS category_icon
             FROM income i
-            LEFT JOIN categories c ON i.category = c.name
+            LEFT JOIN categories c ON (i.category = c.name AND c.user_id = i.user_id)
+            WHERE i.user_id = %s
             ORDER BY i.date DESC, i.id DESC
         """
-        params = ()
+        params = (user_id,)
     else:
         query = """
             SELECT t.id, t.amount, t.category, t.description, t.date, t.payment_method, t.type, c.icon AS category_icon
             FROM (
-                SELECT id, amount, category, description, date, payment_method, 'expense' AS type FROM expenses
+                SELECT id, user_id, amount, category, description, date, payment_method, 'expense' AS type FROM expenses WHERE user_id = %s
                 UNION ALL
-                SELECT id, amount, category, description, date, payment_method, 'income' AS type FROM income
+                SELECT id, user_id, amount, category, description, date, payment_method, 'income' AS type FROM income WHERE user_id = %s
             ) t
-            LEFT JOIN categories c ON t.category = c.name
+            LEFT JOIN categories c ON (t.category = c.name AND c.user_id = t.user_id)
             ORDER BY t.date DESC, t.id DESC
         """
-        params = ()
+        params = (user_id, user_id)
         
     cursor.execute(query, params)
     transactions = cursor.fetchall()
@@ -773,12 +947,12 @@ def transactions_view():
     now = datetime.datetime.now()
     current_month_str = now.strftime("%Y-%m")
     
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
     
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
     
     connection.close()
     
@@ -794,7 +968,9 @@ def transactions_view():
 
 
 @app.route("/analytics")
+@login_required
 def analytics():
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
@@ -802,22 +978,22 @@ def analytics():
     start_date, end_date, filter_range, selected_month, range_label = get_filter_dates()
 
     # 1. Total spent in this active date range
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     monthly_expenses = cursor.fetchone()["total"] or 0
 
     # 2. Total income in this active date range
-    cursor.execute("SELECT SUM(amount) AS total FROM income WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT SUM(amount) AS total FROM income WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     monthly_income = cursor.fetchone()["total"] or 0
 
     # 3. Category distribution (Expenses only)
     cursor.execute("""
         SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
         FROM expenses e
-        LEFT JOIN categories c ON e.category = c.name
-        WHERE e.date BETWEEN %s AND %s
+        LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
         GROUP BY e.category, c.icon
         ORDER BY total DESC
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     category_data = cursor.fetchall()
 
     # Form lists for Chart.js
@@ -830,20 +1006,20 @@ def analytics():
     labels_json = json.dumps(labels)
     values_json = json.dumps(values)
 
-    # 4. Key Stats (Requested)
+    # 4. Key Stats
     # Total Transactions
-    cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     total_transactions = cursor.fetchone()["cnt"] or 0
 
     # Highest Spending Day
     cursor.execute("""
         SELECT date, SUM(amount) AS daily_sum 
         FROM expenses 
-        WHERE date BETWEEN %s AND %s 
+        WHERE user_id = %s AND date BETWEEN %s AND %s 
         GROUP BY date 
         ORDER BY daily_sum DESC 
         LIMIT 1
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     highest_day_row = cursor.fetchone()
     if highest_day_row:
         highest_day_val = float(highest_day_row["daily_sum"])
@@ -869,12 +1045,12 @@ def analytics():
     cursor.execute("""
         SELECT e.category, COUNT(*) AS cnt, c.icon AS category_icon
         FROM expenses e
-        LEFT JOIN categories c ON e.category = c.name
-        WHERE e.date BETWEEN %s AND %s
+        LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
         GROUP BY e.category, c.icon
         ORDER BY cnt DESC
         LIMIT 1
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     most_used_cat_row = cursor.fetchone()
     if most_used_cat_row:
         most_used_category = f"{most_used_cat_row['category_icon'] or '📦'} {most_used_cat_row['category']}"
@@ -885,36 +1061,35 @@ def analytics():
     cursor.execute("""
         SELECT e.payment_method, COUNT(*) AS cnt, p.icon AS pm_icon
         FROM expenses e
-        LEFT JOIN payment_methods p ON e.payment_method = p.name
-        WHERE e.date BETWEEN %s AND %s
+        LEFT JOIN payment_methods p ON (e.payment_method = p.name AND p.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
         GROUP BY e.payment_method, p.icon
         ORDER BY cnt DESC
         LIMIT 1
-    """, (start_date, end_date))
+    """, (user_id, start_date, end_date))
     most_used_pm_row = cursor.fetchone()
     if most_used_pm_row:
         most_used_pm = f"{most_used_pm_row['pm_icon'] or '💳'} {most_used_pm_row['payment_method']}"
     else:
         most_used_pm = "N/A"
 
-    # Original Key Stats
     # Top Category
     top_category = "N/A"
     if category_data:
         top_category = f"{category_data[0]['category_icon'] or '📦'} {category_data[0]['category']}"
 
     # Average Expense Transaction
-    cursor.execute("SELECT AVG(amount) AS avg_amt FROM expenses WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT AVG(amount) AS avg_amt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     avg_expense = cursor.fetchone()["avg_amt"] or 0
 
     # Largest Expense Transaction
-    cursor.execute("SELECT MAX(amount) AS max_amt FROM expenses WHERE date BETWEEN %s AND %s", (start_date, end_date))
+    cursor.execute("SELECT MAX(amount) AS max_amt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
     largest_expense = cursor.fetchone()["max_amt"] or 0
 
     # Sidebar parameters
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
 
     connection.close()
 
@@ -944,26 +1119,26 @@ def analytics():
 
 
 @app.route("/categories")
+@login_required
 def categories_view():
+    user_id = session["user_id"]
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Query all categories
-    cursor.execute("SELECT * FROM categories ORDER BY name ASC")
+    # Query all categories for this user
+    cursor.execute("SELECT * FROM categories WHERE user_id = %s ORDER BY name ASC", (user_id,))
     db_categories = cursor.fetchall()
 
     categories_list = []
     for cat in db_categories:
-        # Count expenses
-        cursor.execute("SELECT COUNT(*) FROM expenses WHERE category = %s", (cat["name"],))
+        cursor.execute("SELECT COUNT(*) FROM expenses WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
         exp_count = cursor.fetchone()[0]
-        # Count income
-        cursor.execute("SELECT COUNT(*) FROM income WHERE category = %s", (cat["name"],))
+        
+        cursor.execute("SELECT COUNT(*) FROM income WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
         inc_count = cursor.fetchone()[0]
         total_count = exp_count + inc_count
 
-        # Total amount spent in this category
-        cursor.execute("SELECT SUM(amount) FROM expenses WHERE category = %s", (cat["name"],))
+        cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
         total_spent = cursor.fetchone()[0] or 0
 
         categories_list.append({
@@ -977,11 +1152,11 @@ def categories_view():
     # Sidebar parameters
     now = datetime.datetime.now()
     current_month_str = now.strftime("%Y-%m")
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
 
     connection.close()
 
@@ -999,7 +1174,7 @@ def categories_view():
 # REPORT DOWNLOADS AND PDF/CSV EXPORTS
 # =========================================
 
-def compute_report_data(report_type, target_val):
+def compute_report_data(user_id, report_type, target_val):
     connection = get_db_connection()
     cursor = connection.cursor()
     
@@ -1012,48 +1187,45 @@ def compute_report_data(report_type, target_val):
     highest_spending_day = 0
     
     if report_type == "daily":
-        # target_val format is YYYY-MM-DD
-        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE date = %s", (target_val,))
+        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date = %s", (user_id, target_val))
         total_spent = cursor.fetchone()["total"] or 0
         
-        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE date = %s", (target_val,))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND date = %s", (user_id, target_val))
         num_transactions = cursor.fetchone()["cnt"] or 0
         
         cursor.execute("""
             SELECT category, SUM(amount) AS total 
             FROM expenses 
-            WHERE date = %s 
+            WHERE user_id = %s AND date = %s 
             GROUP BY category 
             ORDER BY total DESC
-        """, (target_val,))
+        """, (user_id, target_val))
         category_breakdown = cursor.fetchall()
         
         cursor.execute("""
             SELECT date, category, description, payment_method, amount 
             FROM expenses 
-            WHERE date = %s 
+            WHERE user_id = %s AND date = %s 
             ORDER BY id ASC
-        """, (target_val,))
+        """, (user_id, target_val))
         expenses = cursor.fetchall()
         
     elif report_type == "monthly":
-        # target_val format is YYYY-MM
-        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (target_val,))
+        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, target_val))
         total_spent = cursor.fetchone()["total"] or 0
         
-        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE substr(date, 1, 7) = %s", (target_val,))
+        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, target_val))
         num_transactions = cursor.fetchone()["cnt"] or 0
         
         cursor.execute("""
             SELECT category, SUM(amount) AS total 
             FROM expenses 
-            WHERE substr(date, 1, 7) = %s 
+            WHERE user_id = %s AND substr(date, 1, 7) = %s 
             GROUP BY category 
             ORDER BY total DESC
-        """, (target_val,))
+        """, (user_id, target_val))
         category_breakdown = cursor.fetchall()
         
-        # Calculate daily averages
         try:
             year, month = map(int, target_val.split('-'))
             days_in_month = calendar.monthrange(year, month)[1]
@@ -1062,26 +1234,24 @@ def compute_report_data(report_type, target_val):
             
         avg_daily_spend = float(total_spent) / days_in_month
         
-        # Find highest spending day
         cursor.execute("""
             SELECT date, SUM(amount) AS total 
             FROM expenses 
-            WHERE substr(date, 1, 7) = %s 
+            WHERE user_id = %s AND substr(date, 1, 7) = %s 
             GROUP BY date 
             ORDER BY total DESC 
             LIMIT 1
-        """, (target_val,))
+        """, (user_id, target_val))
         high_row = cursor.fetchone()
         highest_spending_day = float(high_row["total"]) if high_row else 0
         
-        # Day-by-day breakdown
         day_sums = {}
         cursor.execute("""
             SELECT date, SUM(amount) AS total 
             FROM expenses 
-            WHERE substr(date, 1, 7) = %s 
+            WHERE user_id = %s AND substr(date, 1, 7) = %s 
             GROUP BY date
-        """, (target_val,))
+        """, (user_id, target_val))
         for r in cursor.fetchall():
             day_sums[r["date"]] = float(r["total"])
             
@@ -1096,9 +1266,9 @@ def compute_report_data(report_type, target_val):
         cursor.execute("""
             SELECT date, category, description, payment_method, amount 
             FROM expenses 
-            WHERE substr(date, 1, 7) = %s 
+            WHERE user_id = %s AND substr(date, 1, 7) = %s 
             ORDER BY date ASC, id ASC
-        """, (target_val,))
+        """, (user_id, target_val))
         expenses = cursor.fetchall()
         
     connection.close()
@@ -1115,7 +1285,9 @@ def compute_report_data(report_type, target_val):
 
 
 @app.route("/downloads")
+@login_required
 def downloads_view():
+    user_id = session["user_id"]
     report_type = request.args.get("type", "monthly").strip().lower()
     target_date = request.args.get("date", "").strip()
     target_month = request.args.get("month", "").strip()
@@ -1126,13 +1298,11 @@ def downloads_view():
     if not target_month:
         target_month = now.strftime("%Y-%m")
         
-    # Calculate report info
     target_val = target_date if report_type == "daily" else target_month
-    report_data = compute_report_data(report_type, target_val)
+    report_data = compute_report_data(user_id, report_type, target_val)
     
     has_data = report_data["num_transactions"] > 0
     
-    # Human-readable title
     if report_type == "daily":
         try:
             d_parsed = datetime.datetime.strptime(target_date, "%Y-%m-%d")
@@ -1146,18 +1316,16 @@ def downloads_view():
         except ValueError:
             report_title = target_month
 
-    # Dynamic currency settings
-    currency_code, currency_symbol = get_currency_info()
+    currency_code, currency_symbol = get_currency_info(user_id)
     
-    # Sidebar parameter calculations (budget progress etc)
     connection = get_db_connection()
     cursor = connection.cursor()
     current_month_str = now.strftime("%Y-%m")
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE substr(date, 1, 7) = %s", (current_month_str,))
+    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting("monthly_budget", "10000.00"))
+    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
 
     return render_template(
@@ -1176,7 +1344,9 @@ def downloads_view():
 
 
 @app.route("/downloads/csv")
+@login_required
 def downloads_csv():
+    user_id = session["user_id"]
     report_type = request.args.get("type", "monthly").strip().lower()
     target_date = request.args.get("date", "").strip()
     target_month = request.args.get("month", "").strip()
@@ -1188,12 +1358,11 @@ def downloads_csv():
         target_month = now.strftime("%Y-%m")
         
     target_val = target_date if report_type == "daily" else target_month
-    report_data = compute_report_data(report_type, target_val)
+    report_data = compute_report_data(user_id, report_type, target_val)
     
     if report_data["num_transactions"] == 0:
         return "No data available for this period.", 400
         
-    # Generate CSV response
     si = io.StringIO()
     cw = csv.writer(si)
     cw.writerow(["Date", "Category", "Description", "Payment Method", "Amount"])
@@ -1218,7 +1387,6 @@ class ExpenseReportPDF(FPDF):
         self.currency_symbol = currency_symbol
 
     def header(self):
-        # Header banner matching dark theme branding
         self.set_fill_color(12, 17, 15)
         self.rect(0, 0, 210, 32, 'F')
         
@@ -1240,7 +1408,9 @@ class ExpenseReportPDF(FPDF):
 
 
 @app.route("/downloads/pdf")
+@login_required
 def downloads_pdf():
+    user_id = session["user_id"]
     report_type = request.args.get("type", "monthly").strip().lower()
     target_date = request.args.get("date", "").strip()
     target_month = request.args.get("month", "").strip()
@@ -1252,12 +1422,12 @@ def downloads_pdf():
         target_month = now.strftime("%Y-%m")
         
     target_val = target_date if report_type == "daily" else target_month
-    report_data = compute_report_data(report_type, target_val)
+    report_data = compute_report_data(user_id, report_type, target_val)
     
     if report_data["num_transactions"] == 0:
         return "No data available for this period.", 400
         
-    _, currency_symbol = get_currency_info()
+    _, currency_symbol = get_currency_info(user_id)
     
     if report_type == "daily":
         try:
@@ -1274,13 +1444,11 @@ def downloads_pdf():
             report_title = target_month
         report_label = f"Monthly Expense Report - {report_title}"
 
-    # Build PDF
     pdf = ExpenseReportPDF(currency_symbol=currency_symbol)
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Document Title
     pdf.set_y(42)
     pdf.set_font("helvetica", "B", 15)
     pdf.set_text_color(30, 35, 33)
@@ -1290,7 +1458,6 @@ def downloads_pdf():
     pdf.cell(0, 5, f"Report Date: {now.strftime('%d %b %Y %H:%M')} | Currency: {currency_symbol}", ln=True, align="L")
     pdf.ln(5)
     
-    # Summary Grid Block
     pdf.set_fill_color(245, 247, 246)
     pdf.set_draw_color(210, 215, 212)
     pdf.set_text_color(30, 35, 33)
@@ -1311,7 +1478,6 @@ def downloads_pdf():
         pdf.cell(42, 14, f"Max Day: {currency_symbol}{float(report_data['highest_spending_day']):.0f}", border=1, fill=True, align="C")
         pdf.ln(18)
 
-    # Category Breakdown Header
     pdf.set_font("helvetica", "B", 12)
     pdf.set_text_color(30, 35, 33)
     pdf.cell(0, 8, "Category Breakdown Summary", ln=True)
@@ -1343,12 +1509,10 @@ def downloads_pdf():
         else:
             pdf.ln(4)
             
-    # Transaction Details table
     pdf.set_font("helvetica", "B", 12)
     pdf.set_text_color(30, 35, 33)
     pdf.cell(0, 8, "Detailed Expense Log List", ln=True)
     
-    # Table headers
     pdf.set_font("helvetica", "B", 9)
     pdf.set_fill_color(225, 230, 227)
     pdf.cell(25, 8, " Date", border=1, fill=True)
@@ -1357,7 +1521,6 @@ def downloads_pdf():
     pdf.cell(30, 8, " Payment Method", border=1, fill=True)
     pdf.cell(25, 8, " Amount ", border=1, fill=True, align="R", ln=True)
     
-    # Rows
     pdf.set_font("helvetica", "", 8)
     for exp in report_data["expenses"]:
         pdf.cell(25, 7, f" {exp['date']}", border=1)
