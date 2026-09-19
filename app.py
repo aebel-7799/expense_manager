@@ -121,6 +121,17 @@ def init_db_with_conn(conn):
         cursor.execute("ALTER TABLE categories ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
         cursor.execute("ALTER TABLE payment_methods ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
 
+        # Drop old single-column unique constraint on name if it exists from previous migrations
+        try:
+            cursor.execute("ALTER TABLE categories DROP CONSTRAINT IF EXISTS categories_name_key")
+        except Exception:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE payment_methods DROP CONSTRAINT IF EXISTS payment_methods_name_key")
+        except Exception:
+            pass
+
         conn.commit()
 
 
@@ -143,7 +154,14 @@ def ensure_user_defaults(conn, user_id):
                 (user_id, "Education", "🎓"),
                 (user_id, "Other", "📦")
             ]
-            cursor.executemany("INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)", default_categories)
+            for uid, name, icon in default_categories:
+                try:
+                    cursor.execute(
+                        "INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)",
+                        (uid, name, icon)
+                    )
+                except Exception:
+                    pass
 
         # Check payment methods count
         cursor.execute("SELECT COUNT(*) FROM payment_methods WHERE user_id = %s", (user_id,))
@@ -155,7 +173,14 @@ def ensure_user_defaults(conn, user_id):
                 (user_id, "Card", "💳"),
                 (user_id, "Other", "💰")
             ]
-            cursor.executemany("INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)", default_payments)
+            for uid, name, icon in default_payments:
+                try:
+                    cursor.execute(
+                        "INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)",
+                        (uid, name, icon)
+                    )
+                except Exception:
+                    pass
 
         conn.commit()
 
