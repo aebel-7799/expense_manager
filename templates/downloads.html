@@ -53,7 +53,7 @@
                     </div>
                 </div>
 
-                <a href="/logout" class="logout-btn">
+                <a href="/logout" class="logout-btn" onclick="confirmLogout(event)">
                     <span class="logout-icon">↩</span> Logout
                 </a>
             </div>
@@ -503,6 +503,47 @@
                 }, 100);
             }
         });
+    </script>
+
+
+    <!-- Logout Confirmation Modal -->
+    <div id="logoutConfirmModal" class="modal-overlay">
+        <div class="modal-card-custom">
+            <div class="modal-icon" style="color: #ff6b6b; background-color: rgba(255, 107, 107, 0.1); border-color: rgba(255, 107, 107, 0.2);">🚪</div>
+            <h3>Logout?</h3>
+            <p>Are you sure you want to logout?</p>
+            <div class="modal-buttons">
+                <button type="button" class="modal-btn-cancel" onclick="closeLogoutModal()">Cancel</button>
+                <button type="button" class="modal-btn-delete" style="background-color: #ff4757; color: #ffffff;" onclick="proceedLogout()">Logout</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function confirmLogout(event) {
+            if (event) event.preventDefault();
+            const modal = document.getElementById('logoutConfirmModal');
+            if (modal) {
+                modal.style.display = 'flex';
+                setTimeout(() => {
+                    modal.classList.add('active');
+                }, 10);
+            }
+        }
+
+        function closeLogoutModal() {
+            const modal = document.getElementById('logoutConfirmModal');
+            if (modal) {
+                modal.classList.remove('active');
+                setTimeout(() => {
+                    modal.style.display = 'none';
+                }, 250);
+            }
+        }
+
+        function proceedLogout() {
+            window.location.href = '/logout';
+        }
     </script>
 
 </body>
