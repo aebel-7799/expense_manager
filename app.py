@@ -124,33 +124,44 @@ def init_db_with_conn(conn):
         conn.commit()
 
 
-def create_default_user_data(conn, user_id):
+def ensure_user_defaults(conn, user_id):
     with conn.cursor() as cursor:
         # Default user settings
         cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'currency', 'INR') ON CONFLICT DO NOTHING", (user_id,))
         cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'monthly_budget', '10000.00') ON CONFLICT DO NOTHING", (user_id,))
 
-        # Default categories for this user
-        default_categories = [
-            (user_id, "Food", "🍔"),
-            (user_id, "Transport", "🚗"),
-            (user_id, "Shopping", "🛍️"),
-            (user_id, "Bills", "🧾"),
-            (user_id, "Entertainment", "🎮"),
-            (user_id, "Other", "📦")
-        ]
-        cursor.executemany("INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)", default_categories)
+        # Check categories count
+        cursor.execute("SELECT COUNT(*) FROM categories WHERE user_id = %s", (user_id,))
+        if cursor.fetchone()[0] == 0:
+            default_categories = [
+                (user_id, "Food", "🍔"),
+                (user_id, "Shopping", "🛍️"),
+                (user_id, "Travel", "🚗"),
+                (user_id, "Bills", "🧾"),
+                (user_id, "Entertainment", "🎮"),
+                (user_id, "Health", "🏥"),
+                (user_id, "Education", "🎓"),
+                (user_id, "Other", "📦")
+            ]
+            cursor.executemany("INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)", default_categories)
 
-        # Default payment methods for this user
-        default_payments = [
-            (user_id, "Cash", "💵"),
-            (user_id, "UPI", "📱"),
-            (user_id, "Card", "💳"),
-            (user_id, "Bank Transfer", "🏦"),
-            (user_id, "Other", "💰")
-        ]
-        cursor.executemany("INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)", default_payments)
+        # Check payment methods count
+        cursor.execute("SELECT COUNT(*) FROM payment_methods WHERE user_id = %s", (user_id,))
+        if cursor.fetchone()[0] == 0:
+            default_payments = [
+                (user_id, "Cash", "💵"),
+                (user_id, "UPI", "📱"),
+                (user_id, "Bank Transfer", "🏦"),
+                (user_id, "Card", "💳"),
+                (user_id, "Other", "💰")
+            ]
+            cursor.executemany("INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)", default_payments)
+
         conn.commit()
+
+
+def create_default_user_data(conn, user_id):
+    ensure_user_defaults(conn, user_id)
 
 
 def init_db():
@@ -207,6 +218,15 @@ def login_required(f):
         if "user_id" not in session:
             flash("Please log in to access Expense Manager.", "error")
             return redirect("/login")
+        
+        user_id = session["user_id"]
+        try:
+            conn = get_db_connection()
+            ensure_user_defaults(conn, user_id)
+            conn.close()
+        except Exception as e:
+            print(f"ensure_user_defaults error: {e}")
+            
         return f(*args, **kwargs)
     return decorated_function
 
