@@ -22,6 +22,17 @@ CURRENCY_SYMBOLS = {
     "JPY": "¥"
 }
 
+DEFAULT_CATEGORY_ICONS = {
+    "Food": "🍔",
+    "Shopping": "🛍️",
+    "Travel": "🚗",
+    "Bills": "💡",
+    "Entertainment": "🎮",
+    "Health": "❤️",
+    "Education": "📚",
+    "Other": "📦"
+}
+
 _db_initialized = False
 
 
@@ -148,10 +159,10 @@ def ensure_user_defaults(conn, user_id):
                 (user_id, "Food", "🍔"),
                 (user_id, "Shopping", "🛍️"),
                 (user_id, "Travel", "🚗"),
-                (user_id, "Bills", "🧾"),
+                (user_id, "Bills", "💡"),
                 (user_id, "Entertainment", "🎮"),
-                (user_id, "Health", "🏥"),
-                (user_id, "Education", "🎓"),
+                (user_id, "Health", "❤️"),
+                (user_id, "Education", "📚"),
                 (user_id, "Other", "📦")
             ]
             for uid, name, icon in default_categories:
@@ -159,6 +170,16 @@ def ensure_user_defaults(conn, user_id):
                     cursor.execute(
                         "INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)",
                         (uid, name, icon)
+                    )
+                except Exception:
+                    pass
+        else:
+            # Sync existing default category icons for existing users in database
+            for cat_name, cat_icon in DEFAULT_CATEGORY_ICONS.items():
+                try:
+                    cursor.execute(
+                        "UPDATE categories SET icon = %s WHERE user_id = %s AND name = %s AND (icon != %s OR icon IS NULL)",
+                        (cat_icon, user_id, cat_name, cat_icon)
                     )
                 except Exception:
                     pass
@@ -1230,6 +1251,8 @@ def compute_report_data(user_id, report_type, target_val):
     day_by_day = []
     avg_daily_spend = 0
     highest_spending_day = 0
+    raw_cb = []
+    raw_expenses = []
     
     if report_type == "daily":
         cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date = %s", (user_id, target_val))
@@ -1239,21 +1262,23 @@ def compute_report_data(user_id, report_type, target_val):
         num_transactions = cursor.fetchone()["cnt"] or 0
         
         cursor.execute("""
-            SELECT category, SUM(amount) AS total 
-            FROM expenses 
-            WHERE user_id = %s AND date = %s 
-            GROUP BY category 
+            SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
+            FROM expenses e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.user_id = %s AND e.date = %s 
+            GROUP BY e.category, c.icon 
             ORDER BY total DESC
         """, (user_id, target_val))
-        category_breakdown = cursor.fetchall()
+        raw_cb = cursor.fetchall()
         
         cursor.execute("""
-            SELECT date, category, description, payment_method, amount 
-            FROM expenses 
-            WHERE user_id = %s AND date = %s 
-            ORDER BY id ASC
+            SELECT e.date, e.category, e.description, e.payment_method, e.amount, c.icon AS category_icon
+            FROM expenses e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.user_id = %s AND e.date = %s 
+            ORDER BY e.id ASC
         """, (user_id, target_val))
-        expenses = cursor.fetchall()
+        raw_expenses = cursor.fetchall()
         
     elif report_type == "monthly":
         cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, target_val))
@@ -1263,13 +1288,14 @@ def compute_report_data(user_id, report_type, target_val):
         num_transactions = cursor.fetchone()["cnt"] or 0
         
         cursor.execute("""
-            SELECT category, SUM(amount) AS total 
-            FROM expenses 
-            WHERE user_id = %s AND substr(date, 1, 7) = %s 
-            GROUP BY category 
+            SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
+            FROM expenses e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.user_id = %s AND substr(e.date, 1, 7) = %s 
+            GROUP BY e.category, c.icon 
             ORDER BY total DESC
         """, (user_id, target_val))
-        category_breakdown = cursor.fetchall()
+        raw_cb = cursor.fetchall()
         
         try:
             year, month = map(int, target_val.split('-'))
@@ -1309,14 +1335,34 @@ def compute_report_data(user_id, report_type, target_val):
             })
             
         cursor.execute("""
-            SELECT date, category, description, payment_method, amount 
-            FROM expenses 
-            WHERE user_id = %s AND substr(date, 1, 7) = %s 
-            ORDER BY date ASC, id ASC
+            SELECT e.date, e.category, e.description, e.payment_method, e.amount, c.icon AS category_icon
+            FROM expenses e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.user_id = %s AND substr(e.date, 1, 7) = %s 
+            ORDER BY e.date ASC, e.id ASC
         """, (user_id, target_val))
-        expenses = cursor.fetchall()
+        raw_expenses = cursor.fetchall()
         
     connection.close()
+
+    for row in raw_cb:
+        icon = row["category_icon"] or DEFAULT_CATEGORY_ICONS.get(row["category"], "📦")
+        category_breakdown.append({
+            "category": row["category"],
+            "total": float(row["total"]),
+            "category_icon": icon
+        })
+
+    for exp in raw_expenses:
+        icon = exp["category_icon"] or DEFAULT_CATEGORY_ICONS.get(exp["category"], "📦")
+        expenses.append({
+            "date": exp["date"],
+            "category": exp["category"],
+            "description": exp["description"],
+            "payment_method": exp["payment_method"],
+            "amount": float(exp["amount"]),
+            "category_icon": icon
+        })
     
     return {
         "total_spent": total_spent,

@@ -159,7 +159,7 @@
                             {% for row in report_data.category_breakdown %}
                                 <div class="settings-item">
                                     <div class="settings-item-left">
-                                        <span class="settings-item-icon">📦</span>
+                                        <span class="settings-item-icon">{{ row.category_icon or '📦' }}</span>
                                         <div>
                                             <div style="font-size: 14px; font-weight: 600;">{{ row.category }}</div>
                                         </div>
@@ -194,7 +194,7 @@
                             {% for expense in report_data.expenses %}
                                 <div class="transaction-row">
                                     <div class="transaction-row-left">
-                                        <div class="category-badge">📦</div>
+                                        <div class="category-badge">{{ expense.category_icon or '📦' }}</div>
                                         <div class="transaction-details">
                                             <h4>{{ expense.category }}</h4>
                                             <p>{{ expense.description or "No description" }}</p>
