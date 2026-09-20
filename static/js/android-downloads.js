@@ -74,8 +74,10 @@
             .then(function () {
                 showToast(successMsg, 'success');
             })
-            .catch(function () {
-                showToast('Download failed. Please try again.', 'error');
+            .catch(function (err) {
+                console.error('[android-downloads] ' + successMsg + ' failed:', err);
+                var detail = ' (' + (err && err.message ? err.message : String(err)) + ')';
+                showToast('Download failed: ' + detail + '.', 'error');
             });
     }
 
