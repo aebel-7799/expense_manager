@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Analytics | Expense Manager</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="{{ url_for('static', filename='js/custom-select.js') }}"></script>
 </head>
 
 <body>
@@ -68,7 +69,7 @@
                     <p>Visual insights of your monthly financial flows ({{ current_month_name }}).</p>
                 </div>
                 <div class="chart-filter">
-                    <select onchange="handleRangeChange(this.value)" autocomplete="off" style="background-color: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; outline: none;">
+                    <select onchange="handleRangeChange(this.value)" autocomplete="off" class="custom-select" data-picker-title="Select Period" style="background-color: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; outline: none;">
                         <option value="today" {% if filter_range == 'today' %}selected{% endif %}>Today</option>
                         <option value="this_week" {% if filter_range == 'this_week' %}selected{% endif %}>This Week</option>
                         <option value="this_month" {% if filter_range == 'this_month' %}selected{% endif %}>This Month</option>
@@ -90,7 +91,12 @@
                     
                     <div class="chart-box-custom">
                         {% if category_data %}
-                            <canvas id="categoryDoughnutChart"></canvas>
+                            <div class="chart-legend-layout">
+                                <div class="chart-legend-canvas">
+                                    <canvas id="categoryDoughnutChart"></canvas>
+                                </div>
+                                <ul class="chart-legend-list" id="categoryLegendList" aria-label="Category legend"></ul>
+                            </div>
                         {% else %}
                             <div style="text-align: center; color: var(--text-secondary); width: 100%;">
                                 <div style="font-size: 32px; margin-bottom: 12px;">📊</div>
@@ -234,24 +240,42 @@
     {% if category_data %}
     <script>
         document.addEventListener("DOMContentLoaded", function() {
+            const palette = [
+                '#35c477', // green
+                '#00a8ff', // blue
+                '#9c88ff', // purple
+                '#ff6b6b', // red
+                '#f1c40f', // yellow
+                '#e67e22', // orange
+                '#1abc9c', // teal
+                '#95a5a6'  // grey
+            ];
+            const labels = {{ labels_json|safe }};
+
+            const legendList = document.getElementById('categoryLegendList');
+            if (legendList) {
+                labels.forEach(function(label, index) {
+                    const item = document.createElement('li');
+                    item.className = 'chart-legend-item';
+                    const dot = document.createElement('span');
+                    dot.className = 'chart-legend-dot';
+                    dot.style.backgroundColor = palette[index % palette.length];
+                    const text = document.createElement('span');
+                    text.className = 'chart-legend-label';
+                    text.textContent = label;
+                    item.appendChild(dot);
+                    item.appendChild(text);
+                    legendList.appendChild(item);
+                });
+            }
+
             const ctx = document.getElementById('categoryDoughnutChart').getContext('2d');
 
-            const narrowScreen = window.matchMedia('(max-width: 1024px)').matches;
-            
             const chartData = {
-                labels: {{ labels_json|safe }},
+                labels: labels,
                 datasets: [{
                     data: {{ values_json|safe }},
-                    backgroundColor: [
-                        '#35c477', // green
-                        '#00a8ff', // blue
-                        '#9c88ff', // purple
-                        '#ff6b6b', // red
-                        '#f1c40f', // yellow
-                        '#e67e22', // orange
-                        '#1abc9c', // teal
-                        '#95a5a6'  // grey
-                    ],
+                    backgroundColor: palette,
                     borderWidth: 1.5,
                     borderColor: '#111715',
                     hoverOffset: 4
@@ -269,17 +293,7 @@
                     },
                     plugins: {
                         legend: {
-                            position: narrowScreen ? 'bottom' : 'right',
-                            labels: {
-                                color: '#7f8985',
-                                boxWidth: 14,
-                                boxHeight: 12,
-                                padding: narrowScreen ? 6 : 15,
-                                font: {
-                                    family: 'Inter',
-                                    size: narrowScreen ? 11 : 12
-                                }
-                            }
+                            display: false
                         },
                         tooltip: {
                             backgroundColor: '#111715',
