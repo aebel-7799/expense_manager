@@ -1,0 +1,9 @@
+{
+  "appId": "com.aebel.expensemanager",
+  "appName": "Expense Manager",
+  "webDir": "www",
+  "server": {
+    "url": "https://expense-manager-ivory-one.vercel.app",
+    "cleartext": false
+  }
+}
