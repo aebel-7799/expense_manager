@@ -1795,30 +1795,42 @@ input[type="date"], input[type="month"] {
 }
 
 @media (max-width: 768px) {
-    /* Keep donut + legend side-by-side on mobile (chart left, legend right),
-       mirroring the desktop Analytics layout */
+    /* Keep donut + legend side-by-side on mobile (donut left, legend right),
+       mirroring the desktop Analytics layout. The donut stays large and uses
+       the card width; the legend is a single tidy column on the right. */
+    .settings-card.analytics-chart-card {
+        padding: 18px 16px;
+    }
+
+    .chart-box-custom {
+        min-height: 0;
+    }
+
     .chart-legend-layout {
         flex-wrap: nowrap;
         gap: 12px;
     }
 
     .chart-legend-canvas {
-        flex: 0 0 130px;
-        width: 130px;
-        height: 130px;
+        flex: 0 0 auto;
+        width: min(340px, calc(100% - 116px));
+        min-width: 150px;
+        height: auto;
+        aspect-ratio: 1 / 1;
     }
 
     .chart-legend-list {
         flex: 1 1 auto;
-        min-width: 0;
+        flex-direction: column;
+        flex-wrap: nowrap;
+        align-items: flex-start;
+        min-width: 84px;
         max-width: none;
-        align-content: center;
-        justify-content: flex-start;
-        gap: 4px 10px;
+        gap: 6px;
     }
 
     .chart-legend-item {
-        gap: 5px;
+        gap: 6px;
         font-size: 11px;
         font-weight: 500;
     }
@@ -1830,9 +1842,10 @@ input[type="date"], input[type="month"] {
     }
 
     .chart-legend-dot {
-        flex: 0 0 8px;
-        width: 8px;
-        height: 8px;
+        flex: 0 0 12px;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
     }
 }
 
@@ -1842,9 +1855,12 @@ input[type="date"], input[type="month"] {
     }
 
     .chart-legend-canvas {
-        flex: 0 0 108px;
-        width: 108px;
-        height: 108px;
+        width: min(300px, calc(100% - 102px));
+        min-width: 130px;
+    }
+
+    .chart-legend-list {
+        min-width: 80px;
     }
 
     .chart-legend-item {
