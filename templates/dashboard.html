@@ -148,7 +148,7 @@
                             <h3>Spending Overview <span>({{ selected_month_name }})</span></h3>
                         </div>
                         <div class="chart-filter">
-                            <select onchange="handleRangeChange(this.value)">
+                            <select onchange="handleRangeChange(this.value)" autocomplete="off">
                                 <option value="today" {% if filter_range == 'today' %}selected{% endif %}>Today</option>
                                 <option value="this_week" {% if filter_range == 'this_week' %}selected{% endif %}>This Week</option>
                                 <option value="this_month" {% if filter_range == 'this_month' %}selected{% endif %}>This Month</option>

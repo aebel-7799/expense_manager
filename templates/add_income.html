@@ -76,10 +76,10 @@
                 <div class="form-card-overhauled">
                     <!-- Visual wallet banner header -->
                     <div class="form-visual-banner" style="background: radial-gradient(circle at center, #1b2a2f, #111517);">
-                        <img src="{{ url_for('static', filename='img/wallet.png') }}" alt="Wallet" class="wallet-img" style="filter: drop-shadow(0 15px 25px rgba(0, 168, 255, 0.25));">
+                        <img src="{{ url_for('static', filename='img/wallet.webp') }}" alt="Wallet" class="wallet-img" decoding="async" style="filter: drop-shadow(0 15px 25px rgba(0, 168, 255, 0.25));">
                     </div>
 
-                    <form method="POST" class="form-body">
+                    <form method="POST" class="form-body" autocomplete="off">
                         
                         <!-- Amount -->
                         <div class="form-group" style="margin-bottom: 22px;">
@@ -94,6 +94,7 @@
                                     min="0"
                                     placeholder="0.00"
                                     required
+                                    autocomplete="off"
                                 >
                             </div>
                         </div>
@@ -101,7 +102,7 @@
                         <!-- Category -->
                         <div class="form-group" style="margin-bottom: 22px;">
                             <label for="category" class="payment-selector-label">Category</label>
-                            <select id="category" name="category" required>
+                            <select id="category" name="category" required autocomplete="off">
                                 <option value="">Select a category</option>
                                 {% for cat in categories %}
                                     <option value="{{ cat.name }}">{{ cat.icon or '📦' }} {{ cat.name }}</option>
@@ -117,6 +118,7 @@
                                 id="description"
                                 name="description"
                                 placeholder="Where did this money come from?"
+                                autocomplete="off"
                             >
                         </div>
 
@@ -130,6 +132,7 @@
                                     name="date"
                                     required
                                     readonly
+                                    autocomplete="off"
                                     onclick="openCustomDatePicker(this)"
                                 >
                                 <span class="calendar-icon">📅</span>

@@ -79,13 +79,13 @@
                         <div class="settings-card-sub">Extract transaction records for a specific date</div>
                     </div>
                     
-                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;">
+                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;" autocomplete="off">
                         <input type="hidden" name="type" value="daily">
                         <input type="hidden" name="month" value="{{ target_month }}">
                         <div class="form-group-custom" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
                             <label style="font-size: 13px; color: var(--text-secondary); font-weight: 600;">Select Date</label>
                             <div class="date-input-wrapper" style="width: 100%;">
-                                <input type="text" name="date" value="{{ target_date }}" required readonly onclick="openCustomDatePicker(this)" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
+                                <input type="text" name="date" value="{{ target_date }}" required readonly onclick="openCustomDatePicker(this)" autocomplete="off" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
                                 <span class="calendar-icon" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); pointer-events: none;">📅</span>
                             </div>
                         </div>
@@ -100,13 +100,13 @@
                         <div class="settings-card-sub">Generate full metrics and day-by-day analysis</div>
                     </div>
                     
-                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;">
+                    <form action="/downloads" method="GET" class="settings-form" style="gap: 15px; width: 100%;" autocomplete="off">
                         <input type="hidden" name="type" value="monthly">
                         <input type="hidden" name="date" value="{{ target_date }}">
                         <div class="form-group-custom" style="display: flex; flex-direction: column; gap: 6px; width: 100%;">
                             <label style="font-size: 13px; color: var(--text-secondary); font-weight: 600;">Select Month</label>
                             <div class="date-input-wrapper" style="width: 100%;">
-                                <input type="text" name="month" value="{{ target_month }}" required readonly onclick="openCustomMonthPicker(this)" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
+                                <input type="text" name="month" value="{{ target_month }}" required readonly onclick="openCustomMonthPicker(this)" autocomplete="off" style="background-color: #0c110f; border: 1px solid var(--border-color); color: var(--text-primary); padding: 12px 42px 12px 12px; border-radius: 10px; font-size: 14px; outline: none; width: 100%; cursor: pointer;">
                                 <span class="calendar-icon" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); pointer-events: none;">📅</span>
                             </div>
                         </div>

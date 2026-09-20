@@ -9,10 +9,6 @@ import csv
 import io
 import calendar
 import os
-from fpdf import FPDF
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "expense-manager-secret-key")
@@ -306,6 +302,27 @@ def get_currency_info(user_id):
     return currency_code, currency_symbol
 
 
+def get_currency_symbol_and_budget(user_id):
+    """Fetch currency symbol + monthly budget in ONE round trip. These two
+    settings are shown together in nearly every page's sidebar, so combining
+    them halves the per-page settings queries."""
+    currency_symbol = "₹"
+    budget = "10000.00"
+    if user_id:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT key, value FROM user_settings WHERE user_id = %s AND key IN ('currency', 'monthly_budget')",
+            (user_id,)
+        )
+        for row in cursor.fetchall():
+            if row["key"] == "currency":
+                currency_symbol = CURRENCY_SYMBOLS.get(row["value"], "₹")
+            elif row["key"] == "monthly_budget":
+                budget = row["value"]
+    return currency_symbol, float(budget)
+
+
 def get_sorted_payment_methods(cursor, user_id):
     cursor.execute("SELECT * FROM payment_methods WHERE user_id = %s", (user_id,))
     rows = cursor.fetchall()
@@ -539,15 +556,19 @@ def home():
     # Get Date Filter Range bounds using helper
     start_date, end_date, filter_range, selected_month, range_label = get_filter_dates()
 
-    # Calculate Monthly Expenses (for the currently active date range)
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    monthly_expenses = cursor.fetchone()["total"] or 0
-
-    # Calculate Spent Today Expenses
+    # Calculate Monthly Expenses + Spent Today in a single query (one round trip)
     now = datetime.datetime.now()
     today_str = now.strftime("%Y-%m-%d")
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date = %s", (user_id, today_str))
-    today_expenses = cursor.fetchone()["total"] or 0
+    cursor.execute("""
+        SELECT
+            COALESCE(SUM(amount), 0) AS month_total,
+            COALESCE(SUM(amount) FILTER (WHERE date = %s), 0) AS today_total
+        FROM expenses
+        WHERE user_id = %s AND date BETWEEN %s AND %s
+    """, (today_str, user_id, start_date, end_date))
+    range_row = cursor.fetchone()
+    monthly_expenses = range_row["month_total"]
+    today_expenses = range_row["today_total"]
 
     # Get Daily Expenses for Chart.js
     cursor.execute("""
@@ -586,11 +607,8 @@ def home():
     chart_labels_json = json.dumps(chart_labels)
     chart_values_json = json.dumps(chart_values)
 
-    # Fetch dynamic currency settings
-    currency_code, currency_symbol = get_currency_info(user_id)
-
-    # Fetch budget settings
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    # Fetch dynamic currency + budget settings (single round trip)
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
 
     # Get Expenses for the SELECTED date range
@@ -666,9 +684,8 @@ def add_expense():
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info(user_id)
 
     return render_template(
         "add_expense.html",
@@ -724,9 +741,8 @@ def add_income():
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info(user_id)
 
     return render_template(
         "add_income.html",
@@ -1078,9 +1094,8 @@ def transactions_view():
     cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
     
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info(user_id)
     
     connection.close()
     
@@ -1105,21 +1120,24 @@ def analytics():
     # Get Date Filter Range bounds using helper
     start_date, end_date, filter_range, selected_month, range_label = get_filter_dates()
 
-    # 1. Total spent in this active date range
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    monthly_expenses = cursor.fetchone()["total"] or 0
-
-    # 2. Total income in this active date range
-    cursor.execute("SELECT SUM(amount) AS total FROM income WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    monthly_income = cursor.fetchone()["total"] or 0
-
-    # 3. Category distribution (Expenses only)
+    # 1. Total spent + total income in this active date range (one round trip)
     cursor.execute("""
-        SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
+        SELECT
+            (SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s),
+            (SELECT COALESCE(SUM(amount), 0) FROM income WHERE user_id = %s AND date BETWEEN %s AND %s)
+    """, (user_id, start_date, end_date, user_id, start_date, end_date))
+    sums_row = cursor.fetchone()
+    monthly_expenses = float(sums_row[0])
+    monthly_income = float(sums_row[1])
+
+    # 2. Category distribution (Expenses only) + per-category transaction count.
+    # The count lets us derive the "most used category" below without a 2nd query.
+    cursor.execute("""
+        SELECT e.category, SUM(e.amount) AS total, COUNT(*) AS cnt, MAX(c.icon) AS category_icon
         FROM expenses e
         LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
         WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
-        GROUP BY e.category, c.icon
+        GROUP BY e.category
         ORDER BY total DESC
     """, (user_id, start_date, end_date))
     category_data = cursor.fetchall()
@@ -1134,10 +1152,17 @@ def analytics():
     labels_json = json.dumps(labels)
     values_json = json.dumps(values)
 
-    # 4. Key Stats
-    # Total Transactions
-    cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    total_transactions = cursor.fetchone()["cnt"] or 0
+    # 3. Key Stats: total transactions, average & largest expense (one round trip)
+    cursor.execute("""
+        SELECT COUNT(*) AS cnt,
+               COALESCE(AVG(amount), 0) AS avg_amt,
+               COALESCE(MAX(amount), 0) AS max_amt
+        FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s
+    """, (user_id, start_date, end_date))
+    stats_row = cursor.fetchone()
+    total_transactions = stats_row["cnt"]
+    avg_expense = float(stats_row["avg_amt"])
+    largest_expense = float(stats_row["max_amt"])
 
     # Highest Spending Day
     cursor.execute("""
@@ -1169,18 +1194,9 @@ def analytics():
         days_in_period = 30
     average_daily_spend = float(monthly_expenses) / days_in_period
 
-    # Most Used Category
-    cursor.execute("""
-        SELECT e.category, COUNT(*) AS cnt, c.icon AS category_icon
-        FROM expenses e
-        LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
-        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
-        GROUP BY e.category, c.icon
-        ORDER BY cnt DESC
-        LIMIT 1
-    """, (user_id, start_date, end_date))
-    most_used_cat_row = cursor.fetchone()
-    if most_used_cat_row:
+    # Most Used Category (derived from the distribution query above)
+    if category_data:
+        most_used_cat_row = max(category_data, key=lambda r: r["cnt"])
         most_used_category = f"{most_used_cat_row['category_icon'] or '📦'} {most_used_cat_row['category']}"
     else:
         most_used_category = "N/A"
@@ -1206,18 +1222,9 @@ def analytics():
     if category_data:
         top_category = f"{category_data[0]['category_icon'] or '📦'} {category_data[0]['category']}"
 
-    # Average Expense Transaction
-    cursor.execute("SELECT AVG(amount) AS avg_amt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    avg_expense = cursor.fetchone()["avg_amt"] or 0
-
-    # Largest Expense Transaction
-    cursor.execute("SELECT MAX(amount) AS max_amt FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s", (user_id, start_date, end_date))
-    largest_expense = cursor.fetchone()["max_amt"] or 0
-
-    # Sidebar parameters
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    # Sidebar parameters (single settings round trip)
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info(user_id)
 
     connection.close()
 
@@ -1294,9 +1301,8 @@ def categories_view():
     current_month_str = now.strftime("%Y-%m")
     cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, current_month_str))
     monthly_expenses = cursor.fetchone()[0] or 0
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
-    _, currency_symbol = get_currency_info(user_id)
 
     connection.close()
 
@@ -1329,11 +1335,13 @@ def compute_report_data(user_id, report_type, target_val):
     raw_expenses = []
     
     if report_type == "daily":
-        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND date = %s", (user_id, target_val))
-        total_spent = cursor.fetchone()["total"] or 0
-        
-        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND date = %s", (user_id, target_val))
-        num_transactions = cursor.fetchone()["cnt"] or 0
+        cursor.execute("""
+            SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt
+            FROM expenses WHERE user_id = %s AND date = %s
+        """, (user_id, target_val))
+        daily_agg = cursor.fetchone()
+        total_spent = daily_agg["total"]
+        num_transactions = daily_agg["cnt"]
         
         cursor.execute("""
             SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
@@ -1355,11 +1363,15 @@ def compute_report_data(user_id, report_type, target_val):
         raw_expenses = cursor.fetchall()
         
     elif report_type == "monthly":
-        cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, target_val))
-        total_spent = cursor.fetchone()["total"] or 0
+        cursor.execute("""
+            SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt
+            FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s
+        """, (user_id, target_val))
+        monthly_agg = cursor.fetchone()
+        total_spent = monthly_agg["total"]
+        num_transactions = monthly_agg["cnt"]
         
-        cursor.execute("SELECT COUNT(*) AS cnt FROM expenses WHERE user_id = %s AND substr(date, 1, 7) = %s", (user_id, target_val))
-        num_transactions = cursor.fetchone()["cnt"] or 0
+
         
         cursor.execute("""
             SELECT e.category, SUM(e.amount) AS total, c.icon AS category_icon
@@ -1379,16 +1391,6 @@ def compute_report_data(user_id, report_type, target_val):
             
         avg_daily_spend = float(total_spent) / days_in_month
         
-        cursor.execute("""
-            SELECT date, SUM(amount) AS total 
-            FROM expenses 
-            WHERE user_id = %s AND substr(date, 1, 7) = %s 
-            GROUP BY date 
-            ORDER BY total DESC 
-            LIMIT 1
-        """, (user_id, target_val))
-        high_row = cursor.fetchone()
-        highest_spending_day = float(high_row["total"]) if high_row else 0
         
         day_sums = {}
         cursor.execute("""
@@ -1399,6 +1401,7 @@ def compute_report_data(user_id, report_type, target_val):
         """, (user_id, target_val))
         for r in cursor.fetchall():
             day_sums[r["date"]] = float(r["total"])
+        highest_spending_day = max(day_sums.values(), default=0)
             
         for d in range(1, days_in_month + 1):
             date_str = f"{target_val}-{d:02d}"
@@ -1481,8 +1484,6 @@ def downloads_view():
         except ValueError:
             report_title = target_month
 
-    currency_code, currency_symbol = get_currency_info(user_id)
-    
     connection = get_db_connection()
     cursor = connection.cursor()
     current_month_str = now.strftime("%Y-%m")
@@ -1490,7 +1491,7 @@ def downloads_view():
     monthly_expenses = cursor.fetchone()[0] or 0
     connection.close()
 
-    budget_limit = float(get_setting(user_id, "monthly_budget", "10000.00"))
+    currency_symbol, budget_limit = get_currency_symbol_and_budget(user_id)
     budget_percent = min(100, int((monthly_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
 
     return render_template(
@@ -1549,6 +1550,9 @@ def downloads_csv():
 @app.route("/downloads/xlsx")
 @login_required
 def downloads_xlsx():
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
     user_id = session["user_id"]
     report_type = request.args.get("type", "monthly").strip().lower()
     target_date = request.args.get("date", "").strip()
@@ -1618,198 +1622,201 @@ def downloads_xlsx():
     return output
 
 
-class ExpenseReportPDF(FPDF):
-    PAGE_W = 210.0
-    MARGIN = 12.0
-    CONTENT_TOP = 40.0
-    CONTENT_W = PAGE_W - 2 * MARGIN
+def _get_pdf_class():
+    from fpdf import FPDF
+    class ExpenseReportPDF(FPDF):
+        PAGE_W = 210.0
+        MARGIN = 12.0
+        CONTENT_TOP = 40.0
+        CONTENT_W = PAGE_W - 2 * MARGIN
 
-    BG = (12, 17, 15)
-    CARD = (18, 24, 21)
-    ROW_ALT = (17, 23, 20)
-    GREEN = (32, 200, 120)
-    WHITE = (238, 245, 241)
-    MUTED = (150, 163, 156)
-    DIM = (105, 120, 112)
-    BORDER = (38, 52, 45)
+        BG = (12, 17, 15)
+        CARD = (18, 24, 21)
+        ROW_ALT = (17, 23, 20)
+        GREEN = (32, 200, 120)
+        WHITE = (238, 245, 241)
+        MUTED = (150, 163, 156)
+        DIM = (105, 120, 112)
+        BORDER = (38, 52, 45)
 
-    def __init__(self, currency_symbol="Rs", *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.currency_symbol = currency_symbol
+        def __init__(self, currency_symbol="Rs", *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.currency_symbol = currency_symbol
 
-    def normalize_text(self, text):
-        if isinstance(text, bytes):
-            text = text.decode("latin-1")
-        try:
-            text.encode("latin-1")
-        except UnicodeEncodeError:
-            text = text.replace("₹", "Rs ").replace("€", "EUR ")
-        return super().normalize_text(text)
+        def normalize_text(self, text):
+            if isinstance(text, bytes):
+                text = text.decode("latin-1")
+            try:
+                text.encode("latin-1")
+            except UnicodeEncodeError:
+                text = text.replace("₹", "Rs ").replace("€", "EUR ")
+            return super().normalize_text(text)
 
-    def header(self):
-        self.set_fill_color(*self.BG)
-        self.rect(0, 0, self.PAGE_W, self.h, "F")
-        self.set_fill_color(*self.GREEN)
-        self.rect(0, 0, self.PAGE_W, 2.2, "F")
-        if self.page_no() == 1:
+        def header(self):
+            self.set_fill_color(*self.BG)
+            self.rect(0, 0, self.PAGE_W, self.h, "F")
             self.set_fill_color(*self.GREEN)
-            self.rect(self.MARGIN, 9.5, 3, 13, "F")
-            self.set_text_color(*self.GREEN)
-            self.set_font("helvetica", "B", 20)
-            self.set_xy(self.MARGIN + 7, 8.5)
-            self.cell(120, 8, "EXPENSE MANAGER", align="L")
-            self.set_text_color(*self.MUTED)
-            self.set_font("helvetica", "I", 9)
-            self.set_xy(self.MARGIN + 7, 17.5)
-            self.cell(120, 5, "Expense Reports Log Summary", align="L")
-            self.set_fill_color(*self.GREEN)
-            self.rect(self.PAGE_W - self.MARGIN - 38, 10.5, 38, 10, "F")
-            self.set_text_color(*self.BG)
-            self.set_font("helvetica", "B", 9)
-            self.set_xy(self.PAGE_W - self.MARGIN - 38, 12.5)
-            self.cell(38, 6, "REPORT", align="C")
+            self.rect(0, 0, self.PAGE_W, 2.2, "F")
+            if self.page_no() == 1:
+                self.set_fill_color(*self.GREEN)
+                self.rect(self.MARGIN, 9.5, 3, 13, "F")
+                self.set_text_color(*self.GREEN)
+                self.set_font("helvetica", "B", 20)
+                self.set_xy(self.MARGIN + 7, 8.5)
+                self.cell(120, 8, "EXPENSE MANAGER", align="L")
+                self.set_text_color(*self.MUTED)
+                self.set_font("helvetica", "I", 9)
+                self.set_xy(self.MARGIN + 7, 17.5)
+                self.cell(120, 5, "Expense Reports Log Summary", align="L")
+                self.set_fill_color(*self.GREEN)
+                self.rect(self.PAGE_W - self.MARGIN - 38, 10.5, 38, 10, "F")
+                self.set_text_color(*self.BG)
+                self.set_font("helvetica", "B", 9)
+                self.set_xy(self.PAGE_W - self.MARGIN - 38, 12.5)
+                self.cell(38, 6, "REPORT", align="C")
+                self.set_draw_color(*self.GREEN)
+                self.set_line_width(0.6)
+                self.line(self.MARGIN, 34, self.PAGE_W - self.MARGIN, 34)
+                self.set_y(self.CONTENT_TOP)
+            else:
+                self.set_font("helvetica", "I", 8)
+                self.set_text_color(*self.MUTED)
+                self.set_xy(self.MARGIN, 4)
+                self.cell(self.CONTENT_W, 5, "EXPENSE MANAGER - Continued", align="L")
+                self.set_draw_color(*self.GREEN)
+                self.set_line_width(0.5)
+                self.line(self.MARGIN, 12.5, self.PAGE_W - self.MARGIN, 12.5)
+                self.set_y(14)
+
+        def footer(self):
+            self.set_y(-14)
+            self.set_fill_color(*self.BG)
+            self.rect(0, self.h - 14, self.PAGE_W, 14, "F")
             self.set_draw_color(*self.GREEN)
-            self.set_line_width(0.6)
-            self.line(self.MARGIN, 34, self.PAGE_W - self.MARGIN, 34)
-            self.set_y(self.CONTENT_TOP)
-        else:
-            self.set_font("helvetica", "I", 8)
+            self.set_line_width(0.3)
+            self.line(self.MARGIN, self.h - 14, self.PAGE_W - self.MARGIN, self.h - 14)
             self.set_text_color(*self.MUTED)
-            self.set_xy(self.MARGIN, 4)
-            self.cell(self.CONTENT_W, 5, "EXPENSE MANAGER - Continued", align="L")
+            self.set_font("helvetica", "I", 8)
+            self.cell(0, 10, f"Page {self.page_no()} | Generated by Expense Manager", align="C")
+
+        def _ensure_space(self, height):
+            if self.get_y() + height > self.page_break_trigger - 3:
+                self.add_page()
+                return True
+            return False
+
+        def section_heading(self, text, continued=False):
+            self.ln(2)
+            y0 = self.get_y()
+            self.set_fill_color(*self.GREEN)
+            self.rect(self.MARGIN, y0 + 1.2, 3.2, 6, "F")
+            self.set_x(self.MARGIN + 7)
+            self.set_font("helvetica", "B", 12)
+            self.set_text_color(*self.GREEN)
+            label = text + (" (continued)" if continued else "")
+            self.cell(self.CONTENT_W - 7, 8, label, ln=True)
             self.set_draw_color(*self.GREEN)
             self.set_line_width(0.5)
-            self.line(self.MARGIN, 12.5, self.PAGE_W - self.MARGIN, 12.5)
-            self.set_y(14)
+            self.line(self.MARGIN, self.get_y() + 0.6, self.PAGE_W - self.MARGIN, self.get_y() + 0.6)
+            self.ln(5)
 
-    def footer(self):
-        self.set_y(-14)
-        self.set_fill_color(*self.BG)
-        self.rect(0, self.h - 14, self.PAGE_W, 14, "F")
-        self.set_draw_color(*self.GREEN)
-        self.set_line_width(0.3)
-        self.line(self.MARGIN, self.h - 14, self.PAGE_W - self.MARGIN, self.h - 14)
-        self.set_text_color(*self.MUTED)
-        self.set_font("helvetica", "I", 8)
-        self.cell(0, 10, f"Page {self.page_no()} | Generated by Expense Manager", align="C")
+        def stat_card(self, x, y, w, h, label, value):
+            self.set_fill_color(*self.CARD)
+            self.set_draw_color(*self.GREEN)
+            self.set_line_width(0.3)
+            self.rect(x, y, w, h, "DF")
+            self.set_fill_color(*self.GREEN)
+            self.rect(x, y, 1.4, h, "F")
+            self.set_font("helvetica", "B", 7)
+            self.set_text_color(*self.GREEN)
+            self.set_xy(x + 4.5, y + 3.5)
+            self.cell(w - 8, 3.5, label, align="L")
+            self.set_font("helvetica", "B", 14)
+            self.set_text_color(*self.WHITE)
+            self.set_xy(x + 4.5, y + 8)
+            self.cell(w - 8, 6, value, align="L")
 
-    def _ensure_space(self, height):
-        if self.get_y() + height > self.page_break_trigger - 3:
-            self.add_page()
-            return True
-        return False
+        def category_row(self, index, category, amount):
+            y0 = self.get_y()
+            self.set_fill_color(*(self.ROW_ALT if index % 2 else self.CARD))
+            self.set_draw_color(*self.BORDER)
+            self.set_line_width(0.2)
+            self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
+            self.set_fill_color(*self.GREEN)
+            self.rect(self.MARGIN, y0, 1.2, 8, "F")
+            self.set_font("helvetica", "", 9.5)
+            self.set_text_color(*self.WHITE)
+            self.set_xy(self.MARGIN + 4, y0 + 1.5)
+            self.cell(self.CONTENT_W - 54, 5, self.fit(category, self.CONTENT_W - 54), align="L")
+            self.set_font("helvetica", "B", 9.5)
+            self.set_text_color(*self.GREEN)
+            self.set_xy(self.MARGIN + 50, y0 + 1.5)
+            self.cell(self.CONTENT_W - 54, 5, amount, align="R")
+            self.set_y(y0 + 8)
 
-    def section_heading(self, text, continued=False):
-        self.ln(2)
-        y0 = self.get_y()
-        self.set_fill_color(*self.GREEN)
-        self.rect(self.MARGIN, y0 + 1.2, 3.2, 6, "F")
-        self.set_x(self.MARGIN + 7)
-        self.set_font("helvetica", "B", 12)
-        self.set_text_color(*self.GREEN)
-        label = text + (" (continued)" if continued else "")
-        self.cell(self.CONTENT_W - 7, 8, label, ln=True)
-        self.set_draw_color(*self.GREEN)
-        self.set_line_width(0.5)
-        self.line(self.MARGIN, self.get_y() + 0.6, self.PAGE_W - self.MARGIN, self.get_y() + 0.6)
-        self.ln(5)
+        def day_cell(self, x, y, w, h, day_label, amount):
+            self.set_fill_color(*self.CARD)
+            self.set_draw_color(*self.GREEN)
+            self.set_line_width(0.25)
+            self.rect(x, y, w, h, "DF")
+            self.set_font("helvetica", "B", 7)
+            self.set_text_color(*self.GREEN)
+            self.set_xy(x + 3, y + 2)
+            self.cell(w - 6, 4, day_label, align="C")
+            self.set_font("helvetica", "B", 9)
+            self.set_text_color(*self.WHITE)
+            self.set_xy(x + 3, y + 6.5)
+            self.cell(w - 6, 4.5, amount, align="C")
 
-    def stat_card(self, x, y, w, h, label, value):
-        self.set_fill_color(*self.CARD)
-        self.set_draw_color(*self.GREEN)
-        self.set_line_width(0.3)
-        self.rect(x, y, w, h, "DF")
-        self.set_fill_color(*self.GREEN)
-        self.rect(x, y, 1.4, h, "F")
-        self.set_font("helvetica", "B", 7)
-        self.set_text_color(*self.GREEN)
-        self.set_xy(x + 4.5, y + 3.5)
-        self.cell(w - 8, 3.5, label, align="L")
-        self.set_font("helvetica", "B", 14)
-        self.set_text_color(*self.WHITE)
-        self.set_xy(x + 4.5, y + 8)
-        self.cell(w - 8, 6, value, align="L")
+        def table_header_row(self):
+            y0 = self.get_y()
+            self.set_fill_color(*self.GREEN)
+            self.set_draw_color(*self.GREEN)
+            self.set_line_width(0.3)
+            self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
+            self.set_font("helvetica", "B", 8)
+            self.set_text_color(*self.BG)
+            cols = [("Date", 24, "L"), ("Category", 32, "L"), ("Description", 68, "L"), ("Payment Method", 32, "L"), ("Amount", 30, "R")]
+            x = self.MARGIN
+            for txt, w, align in cols:
+                self.set_xy(x + (3 if align == "L" else 0), y0 + 2)
+                self.cell(w, 4, txt, align=align)
+                x += w
+            self.set_y(y0 + 8)
 
-    def category_row(self, index, category, amount):
-        y0 = self.get_y()
-        self.set_fill_color(*(self.ROW_ALT if index % 2 else self.CARD))
-        self.set_draw_color(*self.BORDER)
-        self.set_line_width(0.2)
-        self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
-        self.set_fill_color(*self.GREEN)
-        self.rect(self.MARGIN, y0, 1.2, 8, "F")
-        self.set_font("helvetica", "", 9.5)
-        self.set_text_color(*self.WHITE)
-        self.set_xy(self.MARGIN + 4, y0 + 1.5)
-        self.cell(self.CONTENT_W - 54, 5, self.fit(category, self.CONTENT_W - 54), align="L")
-        self.set_font("helvetica", "B", 9.5)
-        self.set_text_color(*self.GREEN)
-        self.set_xy(self.MARGIN + 50, y0 + 1.5)
-        self.cell(self.CONTENT_W - 54, 5, amount, align="R")
-        self.set_y(y0 + 8)
+        def expense_row(self, index, expense, currency_symbol):
+            y0 = self.get_y()
+            self.set_fill_color(*(self.ROW_ALT if index % 2 else self.BG))
+            self.set_draw_color(*self.BORDER)
+            self.set_line_width(0.2)
+            self.rect(self.MARGIN, y0, self.CONTENT_W, 7.5, "DF")
+            self.set_font("helvetica", "", 8.5)
+            self.set_text_color(*self.WHITE)
+            self.set_xy(self.MARGIN + 3, y0 + 1.7)
+            self.cell(24, 4, expense["date"], align="L")
+            self.set_xy(self.MARGIN + 24 + 3, y0 + 1.7)
+            self.cell(32 - 1, 4, self.fit(expense["category"], 28), align="L")
+            self.set_text_color(*self.MUTED)
+            self.set_xy(self.MARGIN + 24 + 32 + 3, y0 + 1.7)
+            self.cell(68 - 1, 4, self.fit(expense["description"] or "", 66), align="L")
+            self.set_text_color(*self.WHITE)
+            self.set_xy(self.MARGIN + 24 + 32 + 68 + 3, y0 + 1.7)
+            self.cell(32 - 1, 4, self.fit(expense["payment_method"], 30), align="L")
+            self.set_font("helvetica", "B", 8.5)
+            self.set_text_color(*self.GREEN)
+            self.set_xy(self.MARGIN + 24 + 32 + 68 + 32, y0 + 1.7)
+            self.cell(30 - 2, 4, f"{currency_symbol}{float(expense['amount']):.2f}", align="R")
+            self.set_y(y0 + 7.5)
 
-    def day_cell(self, x, y, w, h, day_label, amount):
-        self.set_fill_color(*self.CARD)
-        self.set_draw_color(*self.GREEN)
-        self.set_line_width(0.25)
-        self.rect(x, y, w, h, "DF")
-        self.set_font("helvetica", "B", 7)
-        self.set_text_color(*self.GREEN)
-        self.set_xy(x + 3, y + 2)
-        self.cell(w - 6, 4, day_label, align="C")
-        self.set_font("helvetica", "B", 9)
-        self.set_text_color(*self.WHITE)
-        self.set_xy(x + 3, y + 6.5)
-        self.cell(w - 6, 4.5, amount, align="C")
-
-    def table_header_row(self):
-        y0 = self.get_y()
-        self.set_fill_color(*self.GREEN)
-        self.set_draw_color(*self.GREEN)
-        self.set_line_width(0.3)
-        self.rect(self.MARGIN, y0, self.CONTENT_W, 8, "DF")
-        self.set_font("helvetica", "B", 8)
-        self.set_text_color(*self.BG)
-        cols = [("Date", 24, "L"), ("Category", 32, "L"), ("Description", 68, "L"), ("Payment Method", 32, "L"), ("Amount", 30, "R")]
-        x = self.MARGIN
-        for txt, w, align in cols:
-            self.set_xy(x + (3 if align == "L" else 0), y0 + 2)
-            self.cell(w, 4, txt, align=align)
-            x += w
-        self.set_y(y0 + 8)
-
-    def expense_row(self, index, expense, currency_symbol):
-        y0 = self.get_y()
-        self.set_fill_color(*(self.ROW_ALT if index % 2 else self.BG))
-        self.set_draw_color(*self.BORDER)
-        self.set_line_width(0.2)
-        self.rect(self.MARGIN, y0, self.CONTENT_W, 7.5, "DF")
-        self.set_font("helvetica", "", 8.5)
-        self.set_text_color(*self.WHITE)
-        self.set_xy(self.MARGIN + 3, y0 + 1.7)
-        self.cell(24, 4, expense["date"], align="L")
-        self.set_xy(self.MARGIN + 24 + 3, y0 + 1.7)
-        self.cell(32 - 1, 4, self.fit(expense["category"], 28), align="L")
-        self.set_text_color(*self.MUTED)
-        self.set_xy(self.MARGIN + 24 + 32 + 3, y0 + 1.7)
-        self.cell(68 - 1, 4, self.fit(expense["description"] or "", 66), align="L")
-        self.set_text_color(*self.WHITE)
-        self.set_xy(self.MARGIN + 24 + 32 + 68 + 3, y0 + 1.7)
-        self.cell(32 - 1, 4, self.fit(expense["payment_method"], 30), align="L")
-        self.set_font("helvetica", "B", 8.5)
-        self.set_text_color(*self.GREEN)
-        self.set_xy(self.MARGIN + 24 + 32 + 68 + 32, y0 + 1.7)
-        self.cell(30 - 2, 4, f"{currency_symbol}{float(expense['amount']):.2f}", align="R")
-        self.set_y(y0 + 7.5)
-
-    def fit(self, text, width):
-        text = text or ""
-        if self.get_string_width(text) <= width:
-            return text
-        result = text
-        while result and self.get_string_width(result + "...") > width:
-            result = result[:-1]
-        return result + "..."
+        def fit(self, text, width):
+            text = text or ""
+            if self.get_string_width(text) <= width:
+                return text
+            result = text
+            while result and self.get_string_width(result + "...") > width:
+                result = result[:-1]
+            return result + "..."
+    return ExpenseReportPDF
 
 
 @app.route("/downloads/pdf")
@@ -1849,7 +1856,7 @@ def downloads_pdf():
             report_title = target_month
         report_label = f"Monthly Expense Report - {report_title}"
 
-    pdf = ExpenseReportPDF(currency_symbol=currency_symbol)
+    pdf = _get_pdf_class()(currency_symbol=currency_symbol)
     pdf.set_margins(pdf.MARGIN, pdf.CONTENT_TOP, pdf.MARGIN)
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=14)
@@ -1946,8 +1953,6 @@ def downloads_pdf():
     response.headers["Content-Type"] = "application/pdf"
     return response
 
-
-init_db()
 
 if __name__ == "__main__":
     app.run(debug=True)

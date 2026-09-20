@@ -1623,6 +1623,10 @@ input[type="date"], input[type="month"] {
     .analytics-grid {
         grid-template-columns: 1fr;
     }
+
+    .chart-box-custom {
+        height: 400px;
+    }
 }
 
 .chart-box-custom {
@@ -1630,8 +1634,10 @@ input[type="date"], input[type="month"] {
     justify-content: center;
     align-items: center;
     position: relative;
-    height: 260px;
+    height: 320px;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
     margin: auto;
 }
 

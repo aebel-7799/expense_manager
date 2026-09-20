@@ -68,7 +68,7 @@
                     <p>Visual insights of your monthly financial flows ({{ current_month_name }}).</p>
                 </div>
                 <div class="chart-filter">
-                    <select onchange="handleRangeChange(this.value)" style="background-color: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; outline: none;">
+                    <select onchange="handleRangeChange(this.value)" autocomplete="off" style="background-color: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; outline: none;">
                         <option value="today" {% if filter_range == 'today' %}selected{% endif %}>Today</option>
                         <option value="this_week" {% if filter_range == 'this_week' %}selected{% endif %}>This Week</option>
                         <option value="this_month" {% if filter_range == 'this_month' %}selected{% endif %}>This Month</option>
@@ -235,6 +235,8 @@
     <script>
         document.addEventListener("DOMContentLoaded", function() {
             const ctx = document.getElementById('categoryDoughnutChart').getContext('2d');
+
+            const narrowScreen = window.matchMedia('(max-width: 1024px)').matches;
             
             const chartData = {
                 labels: {{ labels_json|safe }},
@@ -262,16 +264,21 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    layout: {
+                        padding: 6
+                    },
                     plugins: {
                         legend: {
-                            position: 'right',
+                            position: narrowScreen ? 'bottom' : 'right',
                             labels: {
                                 color: '#7f8985',
+                                boxWidth: 14,
+                                boxHeight: 12,
+                                padding: narrowScreen ? 6 : 15,
                                 font: {
                                     family: 'Inter',
-                                    size: 12
-                                },
-                                padding: 15
+                                    size: narrowScreen ? 11 : 12
+                                }
                             }
                         },
                         tooltip: {
