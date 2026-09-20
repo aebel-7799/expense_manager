@@ -546,5 +546,12 @@
         }
     </script>
 
+    <!-- Toast Notification System -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Capacitor runtime + Android download handling (inert on the website) -->
+    <script src="{{ url_for('static', filename='js/capacitor/capacitor.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/android-downloads.js') }}"></script>
+
 </body>
 </html>
