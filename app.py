@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, flash, session, make_response
+from flask import Flask, render_template, request, redirect, flash, session, make_response, g, has_request_context
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import psycopg2
@@ -36,28 +36,101 @@ DEFAULT_CATEGORY_ICONS = {
     "Other": "📦"
 }
 
+DEFAULT_PAYMENT_METHODS = (
+    ("Cash", "💵"),
+    ("UPI", "📱"),
+    ("Bank Transfer", "🏦"),
+    ("Card", "💳"),
+    ("Other", "💰")
+)
+
 _db_initialized = False
 
 
-def get_db_connection():
-    global _db_initialized
+def _create_raw_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not configured. Please set DATABASE_URL in your environment or Vercel project settings.")
-    
+
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-        
-    conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.DictCursor)
-    
+
+    return psycopg2.connect(url, cursor_factory=psycopg2.extras.DictCursor)
+
+
+class RequestConnection:
+    """Thin wrapper around a psycopg2 connection that survives route-level
+    close() calls by reconnecting on next use. This lets every helper inside a
+    single HTTP request reuse one Neon connection instead of opening several
+    (each costs a TLS handshake + serverless round trip)."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def _ensure(self):
+        if self._raw.closed:
+            self._raw = _create_raw_connection()
+        return self._raw
+
+    @property
+    def closed(self):
+        return self._raw.closed
+
+    def cursor(self, *args, **kwargs):
+        return self._ensure().cursor(*args, **kwargs)
+
+    def commit(self):
+        return self._ensure().commit()
+
+    def rollback(self):
+        return self._ensure().rollback()
+
+    def close(self):
+        # Keep the request-scoped connection alive so later helpers reuse it.
+        # The real close happens in teardown_appcontext.
+        pass
+
+    def force_close(self):
+        try:
+            self._raw.close()
+        except Exception:
+            pass
+
+
+@app.teardown_appcontext
+def close_request_connection(exception):
+    wrapper = g.pop("_db_conn", None)
+    if wrapper is not None:
+        wrapper.force_close()
+
+
+def get_db_connection():
+    """Return a single connection shared by everything in the current request."""
+    global _db_initialized
+
+    if not has_request_context():
+        conn = _create_raw_connection()
+        if not _db_initialized:
+            try:
+                init_db_with_conn(conn)
+                _db_initialized = True
+            except Exception as e:
+                print(f"Error initializing DB schema: {e}")
+        return conn
+
+    wrapper = getattr(g, "_db_conn", None)
+    if wrapper is None:
+        wrapper = RequestConnection(_create_raw_connection())
+        g._db_conn = wrapper
+
     if not _db_initialized:
         try:
-            init_db_with_conn(conn)
+            init_db_with_conn(wrapper._ensure())
             _db_initialized = True
         except Exception as e:
             print(f"Error initializing DB schema: {e}")
-            
-    return conn
+
+    return wrapper
 
 
 def init_db_with_conn(conn):
@@ -152,59 +225,38 @@ def init_db_with_conn(conn):
 def ensure_user_defaults(conn, user_id):
     with conn.cursor() as cursor:
         # Default user settings
-        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'currency', 'INR') ON CONFLICT DO NOTHING", (user_id,))
-        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'monthly_budget', '10000.00') ON CONFLICT DO NOTHING", (user_id,))
+        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'currency', 'INR') ON CONFLICT (user_id, key) DO NOTHING", (user_id,))
+        cursor.execute("INSERT INTO user_settings (user_id, key, value) VALUES (%s, 'monthly_budget', '10000.00') ON CONFLICT (user_id, key) DO NOTHING", (user_id,))
 
-        # Check categories count
+        # Categories: seed defaults once; otherwise realign existing default icons
+        # with a single idempotent UPDATE instead of one query per category.
         cursor.execute("SELECT COUNT(*) FROM categories WHERE user_id = %s", (user_id,))
         if cursor.fetchone()[0] == 0:
-            default_categories = [
-                (user_id, "Food", "🍔"),
-                (user_id, "Shopping", "🛍️"),
-                (user_id, "Travel", "🚗"),
-                (user_id, "Bills", "💡"),
-                (user_id, "Entertainment", "🎮"),
-                (user_id, "Health", "❤️"),
-                (user_id, "Education", "📚"),
-                (user_id, "Other", "📦")
-            ]
-            for uid, name, icon in default_categories:
-                try:
-                    cursor.execute(
-                        "INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)",
-                        (uid, name, icon)
-                    )
-                except Exception:
-                    pass
+            cursor.executemany(
+                "INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s)",
+                [(user_id, name, icon) for name, icon in DEFAULT_CATEGORY_ICONS.items()]
+            )
         else:
-            # Sync existing default category icons for existing users in database
-            for cat_name, cat_icon in DEFAULT_CATEGORY_ICONS.items():
-                try:
-                    cursor.execute(
-                        "UPDATE categories SET icon = %s WHERE user_id = %s AND name = %s AND (icon != %s OR icon IS NULL)",
-                        (cat_icon, user_id, cat_name, cat_icon)
-                    )
-                except Exception:
-                    pass
+            placeholders = ", ".join(["(%s, %s)"] * len(DEFAULT_CATEGORY_ICONS))
+            params = [icon for pair in DEFAULT_CATEGORY_ICONS.items() for icon in pair]
+            params.append(user_id)
+            cursor.execute(
+                f"""
+                UPDATE categories c
+                SET icon = v.icon
+                FROM (VALUES {placeholders}) AS v(name, icon)
+                WHERE c.user_id = %s AND c.name = v.name AND c.icon IS DISTINCT FROM v.icon
+                """,
+                params
+            )
 
-        # Check payment methods count
+        # Payment methods: seed defaults once.
         cursor.execute("SELECT COUNT(*) FROM payment_methods WHERE user_id = %s", (user_id,))
         if cursor.fetchone()[0] == 0:
-            default_payments = [
-                (user_id, "Cash", "💵"),
-                (user_id, "UPI", "📱"),
-                (user_id, "Bank Transfer", "🏦"),
-                (user_id, "Card", "💳"),
-                (user_id, "Other", "💰")
-            ]
-            for uid, name, icon in default_payments:
-                try:
-                    cursor.execute(
-                        "INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)",
-                        (uid, name, icon)
-                    )
-                except Exception:
-                    pass
+            cursor.executemany(
+                "INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s)",
+                [(user_id, name, icon) for name, icon in DEFAULT_PAYMENT_METHODS]
+            )
 
         conn.commit()
 
@@ -267,15 +319,19 @@ def login_required(f):
         if "user_id" not in session:
             flash("Please log in to access Expense Manager.", "error")
             return redirect("/login")
-        
+
         user_id = session["user_id"]
-        try:
-            conn = get_db_connection()
-            ensure_user_defaults(conn, user_id)
-            conn.close()
-        except Exception as e:
-            print(f"ensure_user_defaults error: {e}")
-            
+        # Seed per-user defaults at most once per session. This avoids running
+        # several database queries on every single request just to re-verify
+        # defaults that only need to be created for new users.
+        if not session.get("_defaults_seeded"):
+            try:
+                conn = get_db_connection()
+                ensure_user_defaults(conn, user_id)
+                session["_defaults_seeded"] = True
+            except Exception as e:
+                print(f"ensure_user_defaults error: {e}")
+
         return f(*args, **kwargs)
     return decorated_function
 
@@ -442,6 +498,7 @@ def signup():
         session["user_id"] = user_id
         session["username"] = username
         session["email"] = email
+        session["_defaults_seeded"] = True
         flash(f"Account created successfully! Welcome, {username}! 🎉", "success")
         return redirect("/")
 
@@ -466,13 +523,15 @@ def home():
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Calculate Total Expenses (All-time for this user)
-    cursor.execute("SELECT SUM(amount) AS total FROM expenses WHERE user_id = %s", (user_id,))
-    total_expenses = cursor.fetchone()["total"] or 0
-
-    # Calculate Total Income (All-time for this user)
-    cursor.execute("SELECT SUM(amount) AS total FROM income WHERE user_id = %s", (user_id,))
-    total_income = cursor.fetchone()["total"] or 0
+    # Calculate Total Expenses and Total Income (All-time for this user)
+    cursor.execute("""
+        SELECT
+            (SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE user_id = %s),
+            (SELECT COALESCE(SUM(amount), 0) FROM income WHERE user_id = %s)
+    """, (user_id, user_id))
+    sums_row = cursor.fetchone()
+    total_expenses = float(sums_row[0] or 0)
+    total_income = float(sums_row[1] or 0)
 
     # Calculate Total Balance
     balance = total_income - total_expenses
@@ -1194,28 +1253,40 @@ def categories_view():
     connection = get_db_connection()
     cursor = connection.cursor()
 
-    # Query all categories for this user
-    cursor.execute("SELECT * FROM categories WHERE user_id = %s ORDER BY name ASC", (user_id,))
-    db_categories = cursor.fetchall()
+    # Aggregate per-category usage in a single query instead of querying the
+    # expenses/income tables once per category.
+    cursor.execute("""
+        SELECT c.id,
+               c.name,
+               c.icon,
+               COALESCE(e.total_count, 0) + COALESCE(i.total_count, 0) AS count,
+               COALESCE(e.total_spent, 0) AS total_spent
+        FROM categories c
+        LEFT JOIN (
+            SELECT category, COUNT(*) AS total_count, SUM(amount) AS total_spent
+            FROM expenses
+            WHERE user_id = %s
+            GROUP BY category
+        ) e ON e.category = c.name
+        LEFT JOIN (
+            SELECT category, COUNT(*) AS total_count
+            FROM income
+            WHERE user_id = %s
+            GROUP BY category
+        ) i ON i.category = c.name
+        WHERE c.user_id = %s
+        ORDER BY c.name ASC
+    """, (user_id, user_id, user_id))
+    category_rows = cursor.fetchall()
 
     categories_list = []
-    for cat in db_categories:
-        cursor.execute("SELECT COUNT(*) FROM expenses WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
-        exp_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM income WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
-        inc_count = cursor.fetchone()[0]
-        total_count = exp_count + inc_count
-
-        cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id = %s AND category = %s", (user_id, cat["name"]))
-        total_spent = cursor.fetchone()[0] or 0
-
+    for cat in category_rows:
         categories_list.append({
             "id": cat["id"],
             "name": cat["name"],
             "icon": cat["icon"],
-            "count": total_count,
-            "total_spent": total_spent
+            "count": cat["count"],
+            "total_spent": float(cat["total_spent"])
         })
 
     # Sidebar parameters
