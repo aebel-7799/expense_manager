@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, flash, session, make_response, g, has_request_context
+from flask import Flask, render_template, request, redirect, flash, session, make_response, g, has_request_context, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import psycopg2
@@ -12,6 +12,27 @@ import os
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "expense-manager-secret-key")
+
+# =========================================
+# SESSION / LOGIN PERSISTENCE
+# =========================================
+# The Capacitor Android app is a WebView that loads this app over the network
+# (see capacitor.config.json -> server.url), so the login state lives in the
+# WebView's cookie store. A cookie sent WITHOUT an Expires/Max-Age is a *session*
+# cookie: it is kept in memory only, so when Android kills the app process (or the
+# user swipes it away from recents) the cookie is gone and the user is asked to log
+# in again. Flask only writes that Expires/Max-Age when the session is marked
+# permanent, so every logged-in session must be `session.permanent = True` - that
+# is what makes the login survive the process being killed. No password is stored
+# anywhere: the cookie is a signed session id payload and is HttpOnly.
+SESSION_LIFETIME_DAYS = 30
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Opt-in only: the production URL is https, but leaving this False keeps plain
+# http local development (`python app.py`) working.
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "").strip().lower() in ("1", "true", "yes", "on")
+app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=SESSION_LIFETIME_DAYS)
+app.permanent_session_lifetime = datetime.timedelta(days=SESSION_LIFETIME_DAYS)
 
 CURRENCY_SYMBOLS = {
     "INR": "₹",
@@ -33,12 +54,27 @@ DEFAULT_CATEGORY_ICONS = {
 }
 
 DEFAULT_PAYMENT_METHODS = (
-    ("Cash", "💵"),
     ("UPI", "📱"),
+    ("Cash", "💵"),
     ("Bank Transfer", "🏦"),
     ("Card", "💳"),
     ("Other", "💰")
 )
+
+# Display order for the seeded methods: UPI first, so it is also the method that
+# is pre-selected on the Add Expense form. Methods the user adds later keep their
+# insertion order and are listed after these. Keep in sync with the tuple above.
+PAYMENT_METHOD_ORDER = ("UPI", "Cash", "Bank Transfer", "Card", "Other")
+DEFAULT_PAYMENT_METHOD = PAYMENT_METHOD_ORDER[0]
+
+
+def payment_method_sort_key(name):
+    """Sort key for payment methods: seeded methods in PAYMENT_METHOD_ORDER first,
+    custom ones after them (stable, so custom methods keep insertion order)."""
+    try:
+        return (0, PAYMENT_METHOD_ORDER.index(name))
+    except ValueError:
+        return (1, 0)
 
 _db_initialized = False
 
@@ -215,6 +251,41 @@ def init_db_with_conn(conn):
         except Exception:
             pass
 
+        # ---- Mobile API migrations (ADDITIVE ONLY - never drops or rewrites data) ----
+        for table in ("expenses", "income", "categories", "payment_methods"):
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE")
+            cursor.execute(f"UPDATE {table} SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_user_updated ON {table} (user_id, updated_at)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens (user_id)")
+
+        # Auto-bump updated_at on any UPDATE (website or API) so mobile sync sees changes.
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION set_updated_at_trigger() RETURNS trigger AS $$
+            BEGIN
+                NEW.updated_at := CURRENT_TIMESTAMP;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        for table in ("expenses", "income", "categories", "payment_methods"):
+            cursor.execute(f"DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}")
+            cursor.execute(f"""
+                CREATE TRIGGER trg_{table}_updated_at
+                BEFORE UPDATE ON {table}
+                FOR EACH ROW EXECUTE FUNCTION set_updated_at_trigger()
+            """)
+
         conn.commit()
 
 
@@ -325,9 +396,32 @@ def get_currency_symbol_and_budget(user_id):
 
 def get_sorted_payment_methods(cursor, user_id):
     cursor.execute("SELECT * FROM payment_methods WHERE user_id = %s", (user_id,))
-    rows = cursor.fetchall()
-    order_map = {"Cash": 1, "UPI": 2, "Bank Transfer": 3, "Card": 4, "Other": 5}
-    return sorted(rows, key=lambda x: order_map.get(x["name"], 99))
+    return sorted(cursor.fetchall(), key=lambda row: payment_method_sort_key(row["name"]))
+
+
+def payment_method_name_taken(user_id, name, exclude_id=None):
+    """True when this user already has a payment method with this name
+    (case-insensitive).
+
+    `payment_methods` has no unique constraint on (user_id, name), so without
+    this check an edit/insert that reuses an existing name silently creates a
+    duplicate row - which then shows up twice in Settings and in the Add Expense
+    picker."""
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    if exclude_id:
+        cursor.execute(
+            "SELECT 1 FROM payment_methods WHERE user_id = %s AND LOWER(name) = LOWER(%s) AND id <> %s",
+            (user_id, name, exclude_id),
+        )
+    else:
+        cursor.execute(
+            "SELECT 1 FROM payment_methods WHERE user_id = %s AND LOWER(name) = LOWER(%s)",
+            (user_id, name),
+        )
+    taken = cursor.fetchone() is not None
+    connection.close()
+    return taken
 
 
 def login_required(f):
@@ -338,6 +432,15 @@ def login_required(f):
             return redirect("/login")
 
         user_id = session["user_id"]
+
+        # Upgrade any session that was created before this was switched on: a
+        # non-permanent session is stored by the WebView in memory only and is lost
+        # when Android kills the app. Setting `permanent` re-sends the cookie with
+        # an explicit Expires/Max-Age, so the login is persisted to disk. Only done
+        # when needed so normal requests do not carry a redundant Set-Cookie.
+        if not session.get("_permanent"):
+            session.permanent = True
+
         # Seed per-user defaults at most once per session. This avoids running
         # several database queries on every single request just to re-verify
         # defaults that only need to be created for new users.
@@ -446,6 +549,7 @@ def login():
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             session["email"] = user["email"]
+            session.permanent = True
             flash(f"Welcome back, {user['username']}! 👋", "success")
             return redirect("/")
         else:
@@ -515,6 +619,7 @@ def signup():
         session["user_id"] = user_id
         session["username"] = username
         session["email"] = email
+        session.permanent = True
         session["_defaults_seeded"] = True
         flash(f"Account created successfully! Welcome, {username}! 🎉", "success")
         return redirect("/")
@@ -651,7 +756,8 @@ def add_expense():
         category = request.form["category"]
         description = request.form["description"]
         date = request.form["date"]
-        payment_method = request.form.get("payment_method", "Cash")
+        # UPI is the first/default payment method; the form always submits it.
+        payment_method = request.form.get("payment_method") or DEFAULT_PAYMENT_METHOD
 
         connection = get_db_connection()
         cursor = connection.cursor()
@@ -962,6 +1068,12 @@ def add_payment_method():
         flash("Payment method name cannot be empty.", "error")
         return redirect("/settings")
 
+    # No unique constraint exists on (user_id, name), so reject duplicates here -
+    # otherwise the same method would show up twice in Settings and in the picker.
+    if payment_method_name_taken(user_id, name):
+        flash(f"A payment method named '{name}' already exists.", "error")
+        return redirect("/settings")
+
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
@@ -970,7 +1082,7 @@ def add_payment_method():
         connection.close()
         flash(f"Payment method '{name}' added successfully.", "success")
     except psycopg2.IntegrityError:
-        flash("A payment method with this name already exists.", "error")
+        flash(f"A payment method named '{name}' already exists.", "error")
 
     return redirect("/settings")
 
@@ -986,25 +1098,34 @@ def edit_payment_method(pay_id):
         flash("Payment method name cannot be empty.", "error")
         return redirect("/settings")
 
+    if payment_method_name_taken(user_id, name, exclude_id=pay_id):
+        flash(f"A payment method named '{name}' already exists. Pick a different name.", "error")
+        return redirect("/settings")
+
     connection = get_db_connection()
     cursor = connection.cursor()
 
     cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
     orig_row = cursor.fetchone()
 
-    if orig_row:
+    if not orig_row:
+        flash("Payment method not found.", "error")
+    else:
         orig_name = orig_row[0]
         try:
             cursor.execute("UPDATE payment_methods SET name = %s, icon = %s WHERE id = %s AND user_id = %s", (name, icon, pay_id, user_id))
-            
+
+            # Keep existing transactions linked to the renamed method instead of
+            # orphaning them.
             if orig_name != name:
                 cursor.execute("UPDATE expenses SET payment_method = %s WHERE payment_method = %s AND user_id = %s", (name, orig_name, user_id))
                 cursor.execute("UPDATE income SET payment_method = %s WHERE payment_method = %s AND user_id = %s", (name, orig_name, user_id))
-                
+
             connection.commit()
-            flash("Payment method details updated successfully.", "success")
+            flash(f"Payment method updated to '{name}'.", "success")
         except psycopg2.IntegrityError:
-            flash("A payment method with this name already exists.", "error")
+            connection.rollback()
+            flash(f"A payment method named '{name}' already exists. Pick a different name.", "error")
 
     connection.close()
     return redirect("/settings")
@@ -1020,7 +1141,9 @@ def delete_payment_method(pay_id):
     cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
     pay_row = cursor.fetchone()
 
-    if pay_row:
+    if not pay_row:
+        flash("Payment method not found.", "error")
+    else:
         pay_name = pay_row[0]
         cursor.execute("SELECT COUNT(*) FROM expenses WHERE payment_method = %s AND user_id = %s", (pay_name, user_id))
         expense_use = cursor.fetchone()[0]
@@ -1029,11 +1152,20 @@ def delete_payment_method(pay_id):
         income_use = cursor.fetchone()[0]
 
         if expense_use > 0 or income_use > 0:
-            flash("This payment method is being used by existing transactions.", "error")
+            # Never delete a method that transactions still point at: that would
+            # leave them without a valid payment method. Blocking + a clear
+            # message keeps the data intact; renaming keeps it linked.
+            used = expense_use + income_use
+            flash(
+                f"'{pay_name}' is used by {used} existing transaction"
+                f"{'s' if used != 1 else ''} and was not deleted. "
+                "Rename it with Edit to keep those transactions linked.",
+                "error",
+            )
         else:
             cursor.execute("DELETE FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user_id))
             connection.commit()
-            flash("Payment method deleted successfully.", "success")
+            flash(f"Payment method '{pay_name}' deleted successfully.", "success")
 
     connection.close()
     return redirect("/settings")
@@ -1951,6 +2083,1246 @@ def downloads_pdf():
     response = make_response(pdf_bytes)
     response.headers["Content-Disposition"] = f"attachment; filename=report_{report_type}_{target_val}.pdf"
     response.headers["Content-Type"] = "application/pdf"
+    return response
+
+
+# =========================================
+# MOBILE JSON API (/api/*)
+# =========================================
+
+import secrets as _secrets
+import hashlib as _hashlib
+
+API_TOKEN_DAYS = 365
+API_TXN_TABLES = {"expense": "expenses", "income": "income"}
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def api_error(message, status=400):
+    return jsonify({"error": message}), status
+
+
+def api_route(rule, **options):
+    methods = options.pop("methods", ["GET"])
+
+    def decorator(f):
+        @app.route(rule, methods=methods, **options)
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except ApiError as e:
+                return api_error(e.message, e.status)
+            except psycopg2.IntegrityError:
+                return api_error("A record with this name already exists.", 409)
+            except Exception as e:
+                print(f"API error [{rule}]: {e}")
+                return api_error("Internal server error", 500)
+
+        return wrapper
+
+    return decorator
+
+
+def api_body():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _hash_token(token):
+    return _hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def issue_token(user_id):
+    token = "em_" + _secrets.token_urlsafe(32)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO api_tokens (user_id, token_hash, expires_at) VALUES (%s, %s, NOW() + make_interval(days => %s))",
+        (user_id, _hash_token(token), API_TOKEN_DAYS),
+    )
+    connection.commit()
+    connection.close()
+    return token
+
+
+def api_current_user():
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise ApiError("Authentication required.", 401)
+    token = auth[7:].strip()
+    if not token:
+        raise ApiError("Authentication required.", 401)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        """SELECT u.id, u.username, u.email, u.created_at
+           FROM api_tokens t
+           JOIN users u ON u.id = t.user_id
+           WHERE t.token_hash = %s
+             AND (t.expires_at IS NULL OR t.expires_at > NOW())""",
+        (_hash_token(token),),
+    )
+    row = cursor.fetchone()
+    connection.close()
+    if not row:
+        raise ApiError("Invalid or expired token. Please log in again.", 401)
+    return _user_dict(row, token)
+
+
+def _user_dict(row, token=None):
+    user = {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+        "created_at": str(row["created_at"]) if row["created_at"] is not None else None,
+    }
+    if token:
+        user["token"] = token
+    return user
+
+
+def _validate_password_fields(password, confirm_password):
+    if len(password or "") < 6:
+        raise ApiError("Password must be at least 6 characters long.")
+    if confirm_password is not None and password != confirm_password:
+        raise ApiError("Passwords do not match.")
+
+
+def _validate_date(value, field="date"):
+    value = (value or "").strip()
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ApiError(f"Invalid {field}. Expected format YYYY-MM-DD.")
+    return value
+
+
+def _validate_amount(value):
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        raise ApiError("Invalid amount.")
+    if amount <= 0 or amount > 1_000_000_000_000:
+        raise ApiError("Amount must be a positive number.")
+    return round(amount, 2)
+
+
+def _clean_str(value, field, max_len=1000, required=True, default=""):
+    value = (value if isinstance(value, str) else default).strip()
+    if required and not value:
+        raise ApiError(f"{field} is required.")
+    if len(value) > max_len:
+        raise ApiError(f"{field} is too long.")
+    return value
+
+
+def api_range_params():
+    filter_range = request.args.get("range", "this_month").strip().lower()
+    if filter_range not in ["today", "this_week", "this_month", "last_month", "this_year", "custom"]:
+        raise ApiError("Invalid range.")
+    selected_month = request.args.get("month", "").strip() or datetime.datetime.now().strftime("%Y-%m")
+    try:
+        parsed_date = datetime.datetime.strptime(selected_month, "%Y-%m")
+    except ValueError:
+        raise ApiError("Invalid month. Expected format YYYY-MM.")
+
+    now = datetime.datetime.now()
+    today = now.date()
+    if filter_range == "today":
+        start_date = end_date = today.strftime("%Y-%m-%d")
+        range_label = "Today"
+    elif filter_range == "this_week":
+        start_of_week = today - datetime.timedelta(days=today.weekday())
+        start_date = start_of_week.strftime("%Y-%m-%d")
+        end_date = (start_of_week + datetime.timedelta(days=6)).strftime("%Y-%m-%d")
+        range_label = "This Week"
+    elif filter_range == "this_month":
+        start_date = today.replace(day=1).strftime("%Y-%m-%d")
+        next_month = today.replace(day=28) + datetime.timedelta(days=4)
+        end_date = (next_month - datetime.timedelta(days=next_month.day)).strftime("%Y-%m-%d")
+        range_label = today.strftime("%B %Y")
+    elif filter_range == "last_month":
+        first_day_this_month = today.replace(day=1)
+        last_day_last_month = first_day_this_month - datetime.timedelta(days=1)
+        first_day_last_month = last_day_last_month.replace(day=1)
+        start_date = first_day_last_month.strftime("%Y-%m-%d")
+        end_date = last_day_last_month.strftime("%Y-%m-%d")
+        range_label = last_day_last_month.strftime("%B %Y")
+    elif filter_range == "this_year":
+        start_date = today.replace(month=1, day=1).strftime("%Y-%m-%d")
+        end_date = today.replace(month=12, day=31).strftime("%Y-%m-%d")
+        range_label = str(today.year)
+    else:
+        first_day = parsed_date.date().replace(day=1)
+        next_month = first_day.replace(day=28) + datetime.timedelta(days=4)
+        end_of_month = next_month - datetime.timedelta(days=next_month.day)
+        start_date = first_day.strftime("%Y-%m-%d")
+        end_date = end_of_month.strftime("%Y-%m-%d")
+        range_label = parsed_date.strftime("%B %Y")
+
+    return start_date, end_date, filter_range, selected_month, range_label
+
+
+def _txn_dict(row, txn_type=None):
+    return {
+        "id": row["id"],
+        "type": txn_type or row["type"],
+        "amount": float(row["amount"]),
+        "category": row["category"],
+        "category_icon": row["category_icon"] if "category_icon" in row.keys() else None,
+        "description": row["description"],
+        "date": row["date"],
+        "payment_method": row["payment_method"] or "Cash",
+        "updated_at": str(row["updated_at"]) if "updated_at" in row.keys() and row["updated_at"] is not None else None,
+    }
+
+
+def _fetch_txn(user_id, table, txn_id):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        f"""SELECT e.*, c.icon AS category_icon
+            FROM {table} e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE e.id = %s AND e.user_id = %s""",
+        (txn_id, user_id),
+    )
+    row = cursor.fetchone()
+    connection.close()
+    if not row:
+        raise ApiError("Transaction not found.", 404)
+    return row
+
+
+def _insert_txn(user_id, table, data, txn_type):
+    amount = _validate_amount(data.get("amount"))
+    category = _clean_str(data.get("category"), "Category", 255)
+    date = _validate_date(data.get("date"))
+    description = _clean_str(data.get("description"), "Description", 2000, required=False)
+    payment_method = _clean_str(data.get("payment_method"), "Payment method", 100, required=False, default="Cash") or "Cash"
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        f"""INSERT INTO {table} (user_id, amount, category, description, date, payment_method)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING *""",
+        (user_id, amount, category, description, date, payment_method),
+    )
+    row = cursor.fetchone()
+    connection.commit()
+    connection.close()
+    out = _txn_dict(row, txn_type)
+    out["category_icon"] = _category_icon(user_id, category)
+    return out
+
+
+def _default_icon_for(category):
+    return DEFAULT_CATEGORY_ICONS.get(category, "📦")
+
+
+def _update_txn(user_id, table, txn_id, data, txn_type):
+    existing = _fetch_txn(user_id, table, txn_id)
+    amount = _validate_amount(data.get("amount", existing["amount"]))
+    category = _clean_str(data.get("category", existing["category"]), "Category", 255)
+    date = _validate_date(data.get("date", existing["date"]))
+    description = _clean_str(
+        data.get("description", existing["description"]), "Description", 2000, required=False
+    )
+    payment_method = _clean_str(
+        data.get("payment_method", existing["payment_method"]), "Payment method", 100,
+        required=False, default="Cash"
+    ) or "Cash"
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        f"""UPDATE {table}
+            SET amount = %s, category = %s, description = %s, date = %s, payment_method = %s
+            WHERE id = %s AND user_id = %s
+            RETURNING *""",
+        (amount, category, description, date, payment_method, txn_id, user_id),
+    )
+    row = cursor.fetchone()
+    connection.commit()
+    connection.close()
+    if not row:
+        raise ApiError("Transaction not found.", 404)
+    out = _txn_dict(row, txn_type)
+    out["category_icon"] = _category_icon(user_id, category)
+    return out
+
+
+def _category_icon(user_id, category):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT icon FROM categories WHERE user_id = %s AND name = %s", (user_id, category))
+    row = cursor.fetchone()
+    connection.close()
+    return row[0] if row else _default_icon_for(category)
+
+
+def _delete_txn(user_id, table, txn_id):
+    existing = _fetch_txn(user_id, table, txn_id)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(f"DELETE FROM {table} WHERE id = %s AND user_id = %s", (txn_id, user_id))
+    connection.commit()
+    connection.close()
+    return existing
+
+
+def _settings_payload(user_id):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT key, value FROM user_settings WHERE user_id = %s AND key IN ('currency', 'monthly_budget')",
+        (user_id,),
+    )
+    currency = "INR"
+    budget = 10000.0
+    for row in cursor.fetchall():
+        if row["key"] == "currency":
+            currency = row["value"]
+        elif row["key"] == "monthly_budget":
+            try:
+                budget = float(row["value"])
+            except ValueError:
+                budget = 10000.0
+    connection.close()
+    return {
+        "currency": currency,
+        "currency_symbol": CURRENCY_SYMBOLS.get(currency, "₹"),
+        "monthly_budget": budget,
+    }
+
+
+def _categories_payload(user_id, with_usage=False):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    if with_usage:
+        cursor.execute(
+            """
+            SELECT c.id, c.name, c.icon, c.updated_at,
+                   COALESCE(e.total_count, 0) + COALESCE(i.total_count, 0) AS count,
+                   COALESCE(e.total_spent, 0) AS total_spent
+            FROM categories c
+            LEFT JOIN (
+                SELECT category, COUNT(*) AS total_count, SUM(amount) AS total_spent
+                FROM expenses WHERE user_id = %s GROUP BY category
+            ) e ON e.category = c.name
+            LEFT JOIN (
+                SELECT category, COUNT(*) AS total_count
+                FROM income WHERE user_id = %s GROUP BY category
+            ) i ON i.category = c.name
+            WHERE c.user_id = %s
+            ORDER BY c.name ASC
+            """,
+            (user_id, user_id, user_id),
+        )
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "icon": r["icon"],
+                "count": r["count"],
+                "total_spent": float(r["total_spent"]),
+                "updated_at": str(r["updated_at"]) if r["updated_at"] is not None else None,
+            }
+            for r in cursor.fetchall()
+        ]
+    cursor.execute(
+        "SELECT id, name, icon, updated_at FROM categories WHERE user_id = %s ORDER BY name ASC",
+        (user_id,),
+    )
+    return [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "icon": r["icon"],
+            "updated_at": str(r["updated_at"]) if r["updated_at"] is not None else None,
+        }
+        for r in cursor.fetchall()
+    ]
+
+
+def _payment_methods_payload(user_id):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT id, name, icon, updated_at FROM payment_methods WHERE user_id = %s",
+        (user_id,),
+    )
+    rows = cursor.fetchall()
+    connection.close()
+    items = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "icon": r["icon"],
+            "updated_at": str(r["updated_at"]) if r["updated_at"] is not None else None,
+        }
+        for r in rows
+    ]
+    items.sort(key=lambda x: payment_method_sort_key(x["name"]))
+    return items
+
+
+def _recent_transactions(user_id, start_date, end_date, limit=10):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT t.id, t.amount, t.category, t.description, t.date, t.payment_method,
+               t.type, c.icon AS category_icon, t.updated_at
+        FROM (
+            SELECT id, user_id, amount, category, description, date, payment_method,
+                   'expense' AS type, updated_at FROM expenses WHERE user_id = %s
+            UNION ALL
+            SELECT id, user_id, amount, category, description, date, payment_method,
+                   'income' AS type, updated_at FROM income WHERE user_id = %s
+        ) t
+        LEFT JOIN categories c ON (t.category = c.name AND c.user_id = t.user_id)
+        ORDER BY t.date DESC, t.id DESC
+        LIMIT %s
+        """,
+        (user_id, user_id, limit),
+    )
+    rows = cursor.fetchall()
+    connection.close()
+    return [_txn_dict(r) for r in rows]
+
+
+# ---------- AUTH ----------
+
+@api_route("/api/health")
+def api_health():
+    return jsonify({"ok": True, "service": "expense-manager-api"})
+
+
+@api_route("/api/register", methods=["POST"])
+def api_register():
+    data = api_body()
+    username = _clean_str(data.get("username"), "Username", 100)
+    email = _clean_str(data.get("email"), "Email", 255).lower()
+    password = str(data.get("password") or "")
+    confirm = str(data.get("confirm_password") or "")
+    if len(username) < 3:
+        raise ApiError("Username must be at least 3 characters long.")
+    if "@" not in email:
+        raise ApiError("Please enter a valid email address.")
+    _validate_password_fields(password, confirm)
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) FROM users WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)",
+        (username, email),
+    )
+    if cursor.fetchone()[0] > 0:
+        connection.close()
+        raise ApiError("Username or Email is already registered. Please log in.", 409)
+
+    pwd_hash = generate_password_hash(password)
+    cursor.execute(
+        "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s) RETURNING id, created_at",
+        (username, email, pwd_hash),
+    )
+    created = cursor.fetchone()
+    user_id = created[0]
+    connection.commit()
+    create_default_user_data(connection, user_id)
+    connection.close()
+
+    token = issue_token(user_id)
+    return jsonify({
+        "token": token,
+        "user": {"id": user_id, "username": username, "email": email,
+                 "created_at": str(created[1]) if created[1] is not None else None},
+    }), 201
+
+
+@api_route("/api/login", methods=["POST"])
+def api_login():
+    data = api_body()
+    username_or_email = _clean_str(data.get("username_or_email"), "Username or email", 255)
+    password = str(data.get("password") or "")
+    if not password:
+        raise ApiError("Password is required.")
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT id, username, email, password_hash, created_at FROM users "
+        "WHERE LOWER(username) = LOWER(%s) OR LOWER(email) = LOWER(%s)",
+        (username_or_email, username_or_email),
+    )
+    user = cursor.fetchone()
+    connection.close()
+    if not user or not check_password_hash(user["password_hash"], password):
+        raise ApiError("Invalid username/email or password.", 401)
+
+    token = issue_token(user["id"])
+    return jsonify({"token": token, "user": _user_dict(user)})
+
+
+@api_route("/api/logout", methods=["POST"])
+def api_logout():
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and auth[7:].strip():
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM api_tokens WHERE token_hash = %s", (_hash_token(auth[7:].strip()),))
+        connection.commit()
+        connection.close()
+    return jsonify({"ok": True})
+
+
+@api_route("/api/me")
+def api_me():
+    return jsonify({"user": api_current_user()})
+
+
+# ---------- TRANSACTIONS ----------
+
+@api_route("/api/transactions")
+def api_transactions():
+    user = api_current_user()
+    txn_type = request.args.get("type", "all").strip().lower()
+    if txn_type not in ("all", "expense", "income"):
+        raise ApiError("Invalid type filter.")
+
+    conditions = ["e.user_id = %s"]
+    params = [user["id"]]
+
+    start = request.args.get("start", "").strip()
+    end = request.args.get("end", "").strip()
+    if start:
+        conditions.append("e.date >= %s")
+        params.append(_validate_date(start, "start"))
+    if end:
+        conditions.append("e.date <= %s")
+        params.append(_validate_date(end, "end"))
+    category = request.args.get("category", "").strip()
+    if category:
+        conditions.append("e.category = %s")
+        params.append(category)
+
+    try:
+        limit = int(request.args.get("limit", "0") or 0)
+        offset = int(request.args.get("offset", "0") or 0)
+    except ValueError:
+        raise ApiError("Invalid limit/offset.")
+    if limit < 0 or limit > 2000 or offset < 0:
+        raise ApiError("Invalid limit/offset.")
+
+    where = " AND ".join(conditions)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    transactions = []
+
+    def run_union(table, ttype):
+        q = f"""
+            SELECT e.id, e.amount, e.category, e.description, e.date, e.payment_method,
+                   e.updated_at, c.icon AS category_icon, '{ttype}' AS type
+            FROM {table} e
+            LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+            WHERE {where}
+        """
+        cursor.execute(q, params)
+        for r in cursor.fetchall():
+            transactions.append(_txn_dict(r))
+
+    if txn_type in ("all", "expense"):
+        run_union("expenses", "expense")
+    if txn_type in ("all", "income"):
+        run_union("income", "income")
+
+    connection.close()
+    transactions.sort(key=lambda t: (t["date"], t["id"] if t["id"] is not None else 0), reverse=True)
+    if offset:
+        transactions = transactions[offset:]
+    if limit:
+        transactions = transactions[:limit]
+    return jsonify({"transactions": transactions})
+
+
+@api_route("/api/transactions/<txn_type>/<int:txn_id>")
+def api_get_transaction(txn_type, txn_id):
+    user = api_current_user()
+    table = API_TXN_TABLES.get(txn_type)
+    if not table:
+        raise ApiError("Invalid transaction type.")
+    return jsonify({"transaction": _txn_dict(_fetch_txn(user["id"], table, txn_id), txn_type)})
+
+
+@api_route("/api/expenses", methods=["POST"])
+def api_create_expense():
+    user = api_current_user()
+    return jsonify({"transaction": _insert_txn(user["id"], "expenses", api_body(), "expense")}), 201
+
+
+@api_route("/api/income", methods=["POST"])
+def api_create_income():
+    user = api_current_user()
+    return jsonify({"transaction": _insert_txn(user["id"], "income", api_body(), "income")}), 201
+
+
+@api_route("/api/expenses/<int:txn_id>", methods=["PUT"])
+def api_update_expense(txn_id):
+    user = api_current_user()
+    return jsonify({"transaction": _update_txn(user["id"], "expenses", txn_id, api_body(), "expense")})
+
+
+@api_route("/api/income/<int:txn_id>", methods=["PUT"])
+def api_update_income(txn_id):
+    user = api_current_user()
+    return jsonify({"transaction": _update_txn(user["id"], "income", txn_id, api_body(), "income")})
+
+
+@api_route("/api/expenses/<int:txn_id>", methods=["DELETE"])
+def api_delete_expense(txn_id):
+    user = api_current_user()
+    _delete_txn(user["id"], "expenses", txn_id)
+    return jsonify({"ok": True})
+
+
+@api_route("/api/income/<int:txn_id>", methods=["DELETE"])
+def api_delete_income(txn_id):
+    user = api_current_user()
+    _delete_txn(user["id"], "income", txn_id)
+    return jsonify({"ok": True})
+
+
+# ---------- CATEGORIES ----------
+
+@api_route("/api/categories")
+def api_categories():
+    user = api_current_user()
+    with_usage = request.args.get("usage") == "1"
+    return jsonify({"categories": _categories_payload(user["id"], with_usage=with_usage)})
+
+
+@api_route("/api/categories", methods=["POST"])
+def api_add_category():
+    user = api_current_user()
+    data = api_body()
+    name = _clean_str(data.get("name"), "Category name", 255)
+    icon = _clean_str(data.get("icon"), "Icon", 50, required=False, default="📦") or "📦"
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO categories (user_id, name, icon) VALUES (%s, %s, %s) RETURNING id, updated_at",
+        (user["id"], name, icon),
+    )
+    row = cursor.fetchone()
+    connection.commit()
+    connection.close()
+    return jsonify({"category": {"id": row[0], "name": name, "icon": icon,
+                                 "updated_at": str(row[1]) if row[1] is not None else None}}), 201
+
+
+@api_route("/api/categories/<int:cat_id>", methods=["PUT"])
+def api_edit_category(cat_id):
+    user = api_current_user()
+    data = api_body()
+    name = _clean_str(data.get("name"), "Category name", 255)
+    icon = _clean_str(data.get("icon"), "Icon", 50, required=False, default="📦") or "📦"
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM categories WHERE id = %s AND user_id = %s", (cat_id, user["id"]))
+    orig = cursor.fetchone()
+    if not orig:
+        connection.close()
+        raise ApiError("Category not found.", 404)
+    orig_name = orig[0]
+    try:
+        cursor.execute(
+            "UPDATE categories SET name = %s, icon = %s WHERE id = %s AND user_id = %s RETURNING id, name, icon, updated_at",
+            (name, icon, cat_id, user["id"]),
+        )
+        row = cursor.fetchone()
+        if orig_name != name:
+            cursor.execute(
+                "UPDATE expenses SET category = %s WHERE category = %s AND user_id = %s",
+                (name, orig_name, user["id"]),
+            )
+            cursor.execute(
+                "UPDATE income SET category = %s WHERE category = %s AND user_id = %s",
+                (name, orig_name, user["id"]),
+            )
+        connection.commit()
+    except psycopg2.IntegrityError:
+        connection.rollback()
+        connection.close()
+        raise ApiError("A category with this name already exists.", 409)
+    connection.close()
+    return jsonify({"category": {"id": row[0], "name": row[1], "icon": row[2],
+                                 "updated_at": str(row[3]) if row[3] is not None else None}})
+
+
+@api_route("/api/categories/<int:cat_id>", methods=["DELETE"])
+def api_delete_category(cat_id):
+    user = api_current_user()
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM categories WHERE id = %s AND user_id = %s", (cat_id, user["id"]))
+    cat = cursor.fetchone()
+    if not cat:
+        connection.close()
+        raise ApiError("Category not found.", 404)
+    name = cat[0]
+    cursor.execute("SELECT COUNT(*) FROM expenses WHERE category = %s AND user_id = %s", (name, user["id"]))
+    used_e = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM income WHERE category = %s AND user_id = %s", (name, user["id"]))
+    used_i = cursor.fetchone()[0]
+    if used_e > 0 or used_i > 0:
+        connection.close()
+        raise ApiError("This category is being used by existing transactions.", 409)
+    cursor.execute("DELETE FROM categories WHERE id = %s AND user_id = %s", (cat_id, user["id"]))
+    connection.commit()
+    connection.close()
+    return jsonify({"ok": True})
+
+
+# ---------- PAYMENT METHODS ----------
+
+@api_route("/api/payment-methods")
+def api_payment_methods():
+    user = api_current_user()
+    return jsonify({"payment_methods": _payment_methods_payload(user["id"])})
+
+
+@api_route("/api/payment-methods", methods=["POST"])
+def api_add_payment_method():
+    user = api_current_user()
+    data = api_body()
+    name = _clean_str(data.get("name"), "Payment method name", 255)
+    icon = _clean_str(data.get("icon"), "Icon", 50, required=False, default="💳") or "💳"
+    if payment_method_name_taken(user["id"], name):
+        raise ApiError(f"A payment method named '{name}' already exists.", 409)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "INSERT INTO payment_methods (user_id, name, icon) VALUES (%s, %s, %s) RETURNING id, updated_at",
+        (user["id"], name, icon),
+    )
+    row = cursor.fetchone()
+    connection.commit()
+    connection.close()
+    return jsonify({"payment_method": {"id": row[0], "name": name, "icon": icon,
+                                       "updated_at": str(row[1]) if row[1] is not None else None}}), 201
+
+
+@api_route("/api/payment-methods/<int:pay_id>", methods=["PUT"])
+def api_edit_payment_method(pay_id):
+    user = api_current_user()
+    data = api_body()
+    name = _clean_str(data.get("name"), "Payment method name", 255)
+    icon = _clean_str(data.get("icon"), "Icon", 50, required=False, default="💳") or "💳"
+
+    if payment_method_name_taken(user["id"], name, exclude_id=pay_id):
+        raise ApiError(f"A payment method named '{name}' already exists. Pick a different name.", 409)
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user["id"]))
+    orig = cursor.fetchone()
+    if not orig:
+        connection.close()
+        raise ApiError("Payment method not found.", 404)
+    orig_name = orig[0]
+    try:
+        cursor.execute(
+            "UPDATE payment_methods SET name = %s, icon = %s WHERE id = %s AND user_id = %s RETURNING id, name, icon, updated_at",
+            (name, icon, pay_id, user["id"]),
+        )
+        row = cursor.fetchone()
+        if orig_name != name:
+            cursor.execute(
+                "UPDATE expenses SET payment_method = %s WHERE payment_method = %s AND user_id = %s",
+                (name, orig_name, user["id"]),
+            )
+            cursor.execute(
+                "UPDATE income SET payment_method = %s WHERE payment_method = %s AND user_id = %s",
+                (name, orig_name, user["id"]),
+            )
+        connection.commit()
+    except psycopg2.IntegrityError:
+        connection.rollback()
+        connection.close()
+        raise ApiError("A payment method with this name already exists.", 409)
+    connection.close()
+    return jsonify({"payment_method": {"id": row[0], "name": row[1], "icon": row[2],
+                                       "updated_at": str(row[3]) if row[3] is not None else None}})
+
+
+@api_route("/api/payment-methods/<int:pay_id>", methods=["DELETE"])
+def api_delete_payment_method(pay_id):
+    user = api_current_user()
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("SELECT name FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user["id"]))
+    pm = cursor.fetchone()
+    if not pm:
+        connection.close()
+        raise ApiError("Payment method not found.", 404)
+    name = pm[0]
+    cursor.execute("SELECT COUNT(*) FROM expenses WHERE payment_method = %s AND user_id = %s", (name, user["id"]))
+    used_e = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM income WHERE payment_method = %s AND user_id = %s", (name, user["id"]))
+    used_i = cursor.fetchone()[0]
+    if used_e > 0 or used_i > 0:
+        connection.close()
+        used = used_e + used_i
+        raise ApiError(
+            f"'{name}' is used by {used} existing transaction"
+            f"{'s' if used != 1 else ''} and was not deleted. "
+            "Rename it to keep those transactions linked.",
+            409,
+        )
+    cursor.execute("DELETE FROM payment_methods WHERE id = %s AND user_id = %s", (pay_id, user["id"]))
+    connection.commit()
+    connection.close()
+    return jsonify({"ok": True})
+
+
+# ---------- SETTINGS ----------
+
+@api_route("/api/settings")
+def api_get_settings():
+    user = api_current_user()
+    return jsonify({"settings": _settings_payload(user["id"])})
+
+
+@api_route("/api/settings", methods=["PUT"])
+def api_update_settings():
+    user = api_current_user()
+    data = api_body()
+    updates = []
+    params = []
+    if "currency" in data:
+        currency = str(data["currency"]).strip().upper()
+        if currency not in CURRENCY_SYMBOLS:
+            raise ApiError("Invalid currency selection.")
+        updates.append(("currency", currency))
+    if "monthly_budget" in data:
+        try:
+            budget_val = float(data["monthly_budget"])
+        except (TypeError, ValueError):
+            raise ApiError("Invalid budget format.")
+        if budget_val < 0:
+            raise ApiError("Budget amount cannot be negative.")
+        updates.append(("monthly_budget", f"{budget_val:.2f}"))
+    if not updates:
+        raise ApiError("Nothing to update.")
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    for key, value in updates:
+        cursor.execute(
+            "INSERT INTO user_settings (user_id, key, value) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value",
+            (user["id"], key, value),
+        )
+    connection.commit()
+    connection.close()
+    return jsonify({"settings": _settings_payload(user["id"])})
+
+
+# ---------- DASHBOARD ----------
+
+@api_route("/api/dashboard")
+def api_dashboard():
+    user = api_current_user()
+    start_date, end_date, filter_range, selected_month, range_label = api_range_params()
+    settings = _settings_payload(user["id"])
+    connection = get_db_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT (SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE user_id = %s),
+               (SELECT COALESCE(SUM(amount), 0) FROM income WHERE user_id = %s)
+        """,
+        (user["id"], user["id"]),
+    )
+    sums = cursor.fetchone()
+    total_expenses = float(sums[0] or 0)
+    total_income = float(sums[1] or 0)
+
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    cursor.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS month_total,
+               COALESCE(SUM(amount) FILTER (WHERE date = %s), 0) AS today_total
+        FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s
+        """,
+        (today_str, user["id"], start_date, end_date),
+    )
+    range_row = cursor.fetchone()
+    range_expenses = float(range_row["month_total"] or 0)
+    today_expenses = float(range_row["today_total"] or 0)
+
+    cursor.execute(
+        """
+        SELECT date, SUM(amount) AS total FROM expenses
+        WHERE user_id = %s AND date BETWEEN %s AND %s
+        GROUP BY date ORDER BY date ASC
+        """,
+        (user["id"], start_date, end_date),
+    )
+    chart_labels = []
+    chart_values = []
+    months_short = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    for row in cursor.fetchall():
+        try:
+            d = datetime.datetime.strptime(row["date"], "%Y-%m-%d")
+            chart_labels.append(f"{d.day} {months_short[d.month - 1]}")
+        except ValueError:
+            chart_labels.append(row["date"])
+        chart_values.append(float(row["total"]))
+    connection.close()
+
+    budget_limit = settings["monthly_budget"]
+    budget_percent = min(100, int((range_expenses / budget_limit) * 100)) if budget_limit > 0 else 0
+
+    return jsonify({
+        "totals": {"income": total_income, "expenses": total_expenses,
+                   "balance": total_income - total_expenses},
+        "range": {"start": start_date, "end": end_date, "label": range_label,
+                  "expenses": range_expenses, "filter": filter_range, "month": selected_month},
+        "today_expenses": today_expenses,
+        "chart": {"labels": chart_labels, "values": chart_values},
+        "budget": {"limit": budget_limit, "percent": budget_percent,
+                   "remaining": budget_limit - range_expenses},
+        "currency_symbol": settings["currency_symbol"],
+        "recent": _recent_transactions(user["id"], start_date, end_date, limit=10),
+    })
+
+
+# ---------- ANALYTICS ----------
+
+@api_route("/api/analytics")
+def api_analytics():
+    user = api_current_user()
+    start_date, end_date, filter_range, selected_month, range_label = api_range_params()
+    settings = _settings_payload(user["id"])
+    connection = get_db_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT (SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s),
+               (SELECT COALESCE(SUM(amount), 0) FROM income WHERE user_id = %s AND date BETWEEN %s AND %s)
+        """,
+        (user["id"], start_date, end_date, user["id"], start_date, end_date),
+    )
+    sums = cursor.fetchone()
+    period_expenses = float(sums[0] or 0)
+    period_income = float(sums[1] or 0)
+
+    cursor.execute(
+        """
+        SELECT e.category, SUM(e.amount) AS total, COUNT(*) AS cnt, MAX(c.icon) AS category_icon
+        FROM expenses e
+        LEFT JOIN categories c ON (e.category = c.name AND c.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
+        GROUP BY e.category ORDER BY total DESC
+        """,
+        (user["id"], start_date, end_date),
+    )
+    category_rows = cursor.fetchall()
+    categories = [
+        {"category": r["category"], "total": float(r["total"]),
+         "count": r["cnt"], "icon": r["category_icon"] or _default_icon_for(r["category"])}
+        for r in category_rows
+    ]
+
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS cnt, COALESCE(AVG(amount), 0) AS avg_amt, COALESCE(MAX(amount), 0) AS max_amt
+        FROM expenses WHERE user_id = %s AND date BETWEEN %s AND %s
+        """,
+        (user["id"], start_date, end_date),
+    )
+    stats = cursor.fetchone()
+
+    cursor.execute(
+        """
+        SELECT date, SUM(amount) AS daily_sum FROM expenses
+        WHERE user_id = %s AND date BETWEEN %s AND %s
+        GROUP BY date ORDER BY daily_sum DESC LIMIT 1
+        """,
+        (user["id"], start_date, end_date),
+    )
+    high = cursor.fetchone()
+
+    cursor.execute(
+        """
+        SELECT e.payment_method, COUNT(*) AS cnt, p.icon AS pm_icon
+        FROM expenses e
+        LEFT JOIN payment_methods p ON (e.payment_method = p.name AND p.user_id = e.user_id)
+        WHERE e.user_id = %s AND e.date BETWEEN %s AND %s
+        GROUP BY e.payment_method, p.icon ORDER BY cnt DESC LIMIT 1
+        """,
+        (user["id"], start_date, end_date),
+    )
+    pm_row = cursor.fetchone()
+
+    monthly_comparison = []
+    cursor.execute(
+        """
+        SELECT substr(date, 1, 7) AS ym, SUM(amount) AS total
+        FROM expenses WHERE user_id = %s
+        GROUP BY ym ORDER BY ym DESC LIMIT 6
+        """,
+        (user["id"],),
+    )
+    for r in cursor.fetchall():
+        monthly_comparison.append({"month": r["ym"], "total": float(r["total"])})
+    connection.close()
+
+    try:
+        dt_start = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+        dt_end = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+        days_in_period = max(1, (dt_end - dt_start).days + 1)
+    except ValueError:
+        days_in_period = 30
+
+    monthly_comparison.reverse()
+    budget_limit = settings["monthly_budget"]
+
+    return jsonify({
+        "totals": {"expenses": period_expenses, "income": period_income},
+        "categories": categories,
+        "stats": {
+            "total_transactions": stats["cnt"],
+            "avg_expense": float(stats["avg_amt"]),
+            "largest_expense": float(stats["max_amt"]),
+            "highest_day": {
+                "date": high["date"] if high else None,
+                "value": float(high["daily_sum"]) if high else 0.0,
+            },
+            "avg_daily_spend": period_expenses / days_in_period,
+            "most_used_category": categories[0]["category"] if categories else None,
+            "most_used_payment_method": pm_row["payment_method"] if pm_row else None,
+            "top_category": categories[0]["category"] if categories else None,
+        },
+        "monthly_comparison": monthly_comparison,
+        "range": {"start": start_date, "end": end_date, "label": range_label,
+                  "filter": filter_range, "month": selected_month},
+        "budget": {"limit": budget_limit,
+                   "percent": min(100, int((period_expenses / budget_limit) * 100)) if budget_limit > 0 else 0},
+        "currency_symbol": settings["currency_symbol"],
+    })
+
+
+# ---------- REPORTS ----------
+
+@api_route("/api/reports/data")
+def api_report_data():
+    user = api_current_user()
+    report_type = request.args.get("type", "monthly").strip().lower()
+    if report_type not in ("daily", "monthly"):
+        raise ApiError("Invalid report type.")
+    target_date = request.args.get("date", "").strip() or datetime.datetime.now().strftime("%Y-%m-%d")
+    target_month = request.args.get("month", "").strip() or datetime.datetime.now().strftime("%Y-%m")
+    target_val = _validate_date(target_date) if report_type == "daily" else None
+    if report_type == "monthly":
+        try:
+            datetime.datetime.strptime(target_month, "%Y-%m")
+        except ValueError:
+            raise ApiError("Invalid month. Expected format YYYY-MM.")
+        target_val = target_month
+
+    report = compute_report_data(user["id"], report_type, target_val)
+    settings = _settings_payload(user["id"])
+
+    if report_type == "daily":
+        try:
+            title = datetime.datetime.strptime(target_val, "%Y-%m-%d").strftime("%d %b %Y")
+        except ValueError:
+            title = target_val
+    else:
+        try:
+            title = datetime.datetime.strptime(target_val, "%Y-%m").strftime("%B %Y")
+        except ValueError:
+            title = target_val
+
+    return jsonify({
+        "type": report_type,
+        "target": target_val,
+        "title": title,
+        "currency_symbol": settings["currency_symbol"],
+        **report,
+    })
+
+
+# ---------- SYNC ----------
+
+def _sync_table(connection, user_id, table, since, txn_type=None):
+    cursor = connection.cursor()
+    cursor.execute(
+        f"SELECT * FROM {table} WHERE user_id = %s AND (updated_at IS NULL OR updated_at > %s)",
+        (user_id, since),
+    )
+    changed = []
+    for row in cursor.fetchall():
+        if txn_type:
+            changed.append(_txn_dict(row, txn_type))
+        else:
+            changed.append({
+                "id": row["id"],
+                "name": row["name"],
+                "icon": row["icon"],
+                "updated_at": str(row["updated_at"]) if row["updated_at"] is not None else None,
+            })
+    cursor.execute(f"SELECT id FROM {table} WHERE user_id = %s", (user_id,))
+    all_ids = [r[0] for r in cursor.fetchall()]
+    return changed, all_ids
+
+
+def _icon_map(connection, user_id):
+    cursor = connection.cursor()
+    cursor.execute("SELECT name, icon FROM categories WHERE user_id = %s", (user_id,))
+    return {r[0]: r[1] for r in cursor.fetchall()}
+
+
+@api_route("/api/sync")
+def api_sync():
+    user = api_current_user()
+    since_raw = request.args.get("since", "").strip()
+    if since_raw:
+        try:
+            since = datetime.datetime.fromisoformat(since_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            raise ApiError("Invalid since timestamp. Expected ISO-8601.")
+    else:
+        since = datetime.datetime(1970, 1, 1)
+
+    connection = get_db_connection()
+    exp_changed, exp_ids = _sync_table(connection, user["id"], "expenses", since, "expense")
+    inc_changed, inc_ids = _sync_table(connection, user["id"], "income", since, "income")
+    cat_changed, cat_ids = _sync_table(connection, user["id"], "categories", since)
+    pm_changed, pm_ids = _sync_table(connection, user["id"], "payment_methods", since)
+    icons = _icon_map(connection, user["id"])
+
+    cursor = connection.cursor()
+    cursor.execute("SELECT NOW() AS now")
+    server_time = cursor.fetchone()["now"].isoformat(sep=" ")
+    connection.close()
+
+    for t in exp_changed + inc_changed:
+        t["category_icon"] = icons.get(t["category"], _default_icon_for(t["category"]))
+
+    return jsonify({
+        "server_time": server_time,
+        "changed": {
+            "expenses": exp_changed,
+            "income": inc_changed,
+            "categories": cat_changed,
+            "payment_methods": pm_changed,
+        },
+        "ids": {
+            "expenses": exp_ids,
+            "income": inc_ids,
+            "categories": cat_ids,
+            "payment_methods": pm_ids,
+        },
+        "settings": _settings_payload(user["id"]),
+        "user": {"id": user["id"], "username": user["username"], "email": user["email"]},
+    })
+
+
+@api_route("/api/initial")
+def api_initial():
+    user = api_current_user()
+    connection = get_db_connection()
+    cursor = connection.cursor()
+
+    def fetch_all(table, txn_type=None):
+        cursor.execute(f"SELECT * FROM {table} WHERE user_id = %s ORDER BY id ASC", (user["id"],))
+        rows = []
+        for row in cursor.fetchall():
+            if txn_type:
+                rows.append(_txn_dict(row, txn_type))
+            else:
+                rows.append({
+                    "id": row["id"],
+                    "name": row["name"],
+                    "icon": row["icon"],
+                    "updated_at": str(row["updated_at"]) if row["updated_at"] is not None else None,
+                })
+        return rows
+
+    expenses = fetch_all("expenses", "expense")
+    income = fetch_all("income", "income")
+    categories = fetch_all("categories")
+    payment_methods = fetch_all("payment_methods")
+    icons = _icon_map(connection, user["id"])
+    cursor.execute("SELECT NOW() AS now")
+    server_time = cursor.fetchone()["now"].isoformat(sep=" ")
+    connection.close()
+
+    for t in expenses + income:
+        t["category_icon"] = icons.get(t["category"], _default_icon_for(t["category"]))
+
+    return jsonify({
+        "server_time": server_time,
+        "user": {"id": user["id"], "username": user["username"], "email": user["email"]},
+        "settings": _settings_payload(user["id"]),
+        "categories": categories,
+        "payment_methods": payment_methods,
+        "expenses": expenses,
+        "income": income,
+    })
+
+
+# ---------- CORS ----------
+
+@app.before_request
+def api_cors_preflight():
+    if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        return "", 204
+    return None
+
+
+@app.after_request
+def api_cors_headers(response):
+    if request.path.startswith("/api/"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        if response.content_type and response.content_type.startswith("application/json"):
+            response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.after_request
+def no_store_authenticated_pages(response):
+    """Never let an authenticated page (or the login page) be served from a cache.
+
+    The Capacitor WebView restores the login from its cookie on the very first
+    request, so the app opens straight on the dashboard. If a cached copy of
+    /login were replayed, the user would see the login form flash up and then get
+    redirected - the "brief flash of the login page" this avoids. `no-store` also
+    keeps one user's page out of any shared cache. Static files are served by
+    Vercel/CDN and are not touched."""
+    if request.path.startswith("/api/") or request.path.startswith("/static/"):
+        return response
+    if "text/html" in (response.headers.get("Content-Type") or ""):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
     return response
 
 

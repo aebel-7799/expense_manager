@@ -143,11 +143,11 @@
 
                         <!-- Payment Method Selector -->
                         <div class="form-group" style="margin-bottom: 25px;">
-                            <span class="payment-selector-label">Payment Method (optional)</span>
+                            <span class="payment-selector-label">Payment Method</span>
                             <div class="payment-method-group">
                                 {% for method in payment_methods %}
-                                    <label class="payment-option-pill {% if method.name == 'Cash' %}active{% endif %}">
-                                        <input type="radio" name="payment_method" value="{{ method.name }}" {% if method.name == 'Cash' %}checked{% endif %} onchange="updatePaymentSelect(this)">
+                                    <label class="payment-option-pill {% if loop.first %}active{% endif %}">
+                                        <input type="radio" name="payment_method" value="{{ method.name }}" {% if loop.first %}checked{% endif %} onchange="updatePaymentSelect(this)">
                                         <span class="payment-option-icon">{{ method.icon or '💳' }}</span>
                                         <span>{{ method.name }}</span>
                                     </label>

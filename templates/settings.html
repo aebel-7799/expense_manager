@@ -168,7 +168,7 @@
                                     <span>{{ category.name }}</span>
                                 </div>
                                 <div class="settings-item-actions">
-                                    <button type="button" class="action-btn-text" onclick="openEditCategoryModal('{{ category.id }}', '{{ category.name }}', '{{ category.icon }}')">Edit</button>
+                                    <button type="button" class="action-btn-text" onclick="openEditCategoryModal({{ category.id }}, {{ (category.name or '')|tojson }}, {{ (category.icon or '📦')|tojson }})">Edit</button>
                                     <form action="/settings/category/delete/{{ category.id }}" method="POST" style="display:inline;" onsubmit="return confirmDeleteAction(event, 'category')">
                                         <button type="submit" class="action-btn-text delete">Delete</button>
                                     </form>
@@ -195,7 +195,7 @@
                                     <span>{{ method.name }}</span>
                                 </div>
                                 <div class="settings-item-actions">
-                                    <button type="button" class="action-btn-text" onclick="openEditPaymentModal('{{ method.id }}', '{{ method.name }}', '{{ method.icon }}')">Edit</button>
+                                    <button type="button" class="action-btn-text" onclick="openEditPaymentModal({{ method.id }}, {{ (method.name or '')|tojson }}, {{ (method.icon or '💳')|tojson }})">Edit</button>
                                     <form action="/settings/payment/delete/{{ method.id }}" method="POST" style="display:inline;" onsubmit="return confirmDeleteAction(event, 'payment method')">
                                         <button type="submit" class="action-btn-text delete">Delete</button>
                                     </form>
@@ -388,6 +388,7 @@
             document.getElementById('deleteModalTitle').innerText = `Delete ${itemType.charAt(0).toUpperCase() + itemType.slice(1)}?`;
             document.getElementById('deleteModalText').innerText = `Are you sure you want to delete this ${itemType}? This action cannot be undone.`;
             
+            document.getElementById('confirmDeleteBtn').disabled = false;
             showModal('deleteConfirmModal');
             return false;
         }
@@ -398,10 +399,16 @@
         }
 
         document.addEventListener("DOMContentLoaded", function() {
-            document.getElementById('confirmDeleteBtn').addEventListener('click', function() {
-                if (deleteFormReference) {
-                    deleteFormReference.submit();
-                }
+            const confirmBtn = document.getElementById('confirmDeleteBtn');
+            confirmBtn.addEventListener('click', function() {
+                if (!deleteFormReference) return;
+                // Submit once, then disable so a double tap cannot send a second
+                // delete (which would land on an already-removed item).
+                const form = deleteFormReference;
+                deleteFormReference = null;
+                confirmBtn.disabled = true;
+                hideModal('deleteConfirmModal');
+                form.submit();
             });
         });
     </script>
